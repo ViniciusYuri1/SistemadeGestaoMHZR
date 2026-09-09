@@ -16,6 +16,8 @@
 
   const MONTH_NAMES = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 
+  const COST_TYPES = ["Funcionários", "Inteligência Artificial", "Banco de Dados", "Marketing", "Infraestrutura", "Ferramentas/Software", "Impostos", "Outros"];
+
   function brl(v) {
     return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v || 0);
   }
@@ -43,7 +45,11 @@
   }
 
   /* ---- estado de filtros (persiste entre trocas de aba) ---- */
-  let state = { tab: "boletos", filterMonth: currentYM(), filterCompany: "", filterStatus: "" };
+  let state = {
+    tab: "boletos",
+    filterMonth: currentYM(), filterCompany: "", filterStatus: "",
+    costFilterMonth: currentYM(), costFilterType: ""
+  };
 
   /* ================================================================= */
   /* BOLETOS TAB                                                        */
@@ -177,6 +183,132 @@
       btn.addEventListener("click", () => {
         const b = DB.Boletos.get(btn.dataset.viewAttach);
         if (b && b.attachment) UI.openAttachment(b.attachment);
+      });
+    });
+  }
+
+  /* ================================================================= */
+  /* CUSTOS TAB                                                         */
+  /* ================================================================= */
+
+  function statCardHtml(c) {
+    return `
+      <div class="stat-card">
+        <div class="stat-top"><div class="stat-icon" style="background:${c.bg};color:${c.color};">${c.icon}</div></div>
+        <div class="stat-value" style="font-size:1.15rem;${c.valueColor ? `color:${c.valueColor};` : ""}">${c.value}</div>
+        <div class="stat-label">${c.label}</div>
+      </div>`;
+  }
+
+  function renderCustosSummaryCards() {
+    const allCosts    = DB.Costs.list();
+    const totalCustos = allCosts.reduce((s, c) => s + (c.amount || 0), 0);
+    const totalRecebido = DB.Boletos.list().filter((b) => b.status === "pago").reduce((s, b) => s + b.amount, 0);
+    const lucroLiquido  = totalRecebido - totalCustos;
+    const mes = state.costFilterMonth || currentYM();
+    const custosDoMes = allCosts.filter((c) => c.month === mes).reduce((s, c) => s + (c.amount || 0), 0);
+
+    return `<div class="stat-grid">${[
+      { icon: "💵", bg: "var(--color-success-light)", color: "var(--color-success)", value: brl(totalRecebido), label: "Total Recebido" },
+      { icon: "💸", bg: "var(--color-danger-light)",  color: "var(--color-danger)",  value: brl(totalCustos),   label: "Total de Custos" },
+      { icon: lucroLiquido >= 0 ? "📈" : "📉", bg: "var(--color-primary-light)", color: "var(--color-primary)",
+        value: brl(lucroLiquido), valueColor: lucroLiquido >= 0 ? "var(--color-success)" : "var(--color-danger)", label: "Lucro Líquido" },
+      { icon: "📅", bg: "var(--color-warning-light)", color: "var(--color-warning)", value: brl(custosDoMes), label: `Custos em ${monthLabel(mes)}` }
+    ].map(statCardHtml).join("")}</div>`;
+  }
+
+  function renderProjectionCards() {
+    const a = DB.Stats.costAnalysis();
+    return `
+      <div class="card" style="margin-top:16px;margin-bottom:20px;">
+        <div class="card-header">
+          <h3 class="card-title">📊 Projeção ${a.year} (mantendo a média mensal atual)</h3>
+        </div>
+        <div class="card-pad">
+          <p class="text-sm text-muted" style="margin-bottom:14px;">
+            Com base na média mensal registrada de Jan a ${MONTH_NAMES[a.monthsElapsed - 1]}/${a.year}
+            (${a.monthsElapsed} mês${a.monthsElapsed !== 1 ? "es" : ""}), projetado para os ${a.monthsRemaining}
+            mês${a.monthsRemaining !== 1 ? "es" : ""} restante${a.monthsRemaining !== 1 ? "s" : ""} do ano.
+          </p>
+          <div class="stat-grid">${[
+            { icon: "💸", bg: "var(--color-danger-light)",  color: "var(--color-danger)",  value: brl(a.avgMonthlyCost), label: "Custo médio mensal" },
+            { icon: "📆", bg: "var(--color-danger-light)",  color: "var(--color-danger)",  value: brl(a.projectedCost),  label: `Custo projetado até Dez/${a.year}` },
+            { icon: "💰", bg: "var(--color-success-light)", color: "var(--color-success)", value: brl(a.projectedReceived), label: `Recebido projetado até Dez/${a.year}` },
+            { icon: a.projectedNetProfit >= 0 ? "📈" : "📉", bg: "var(--color-primary-light)", color: "var(--color-primary)",
+              value: brl(a.projectedNetProfit), valueColor: a.projectedNetProfit >= 0 ? "var(--color-success)" : "var(--color-danger)",
+              label: `Lucro líquido projetado até Dez/${a.year}` }
+          ].map(statCardHtml).join("")}</div>
+        </div>
+      </div>`;
+  }
+
+  function renderCustosTab(wrap) {
+    const all = DB.Costs.list();
+    const knownTypes = Array.from(new Set([...COST_TYPES, ...all.map((c) => c.type)])).filter(Boolean);
+
+    let filtered = all;
+    if (state.costFilterMonth) filtered = filtered.filter((c) => c.month === state.costFilterMonth);
+    if (state.costFilterType)  filtered = filtered.filter((c) => c.type === state.costFilterType);
+
+    const rows = filtered.length === 0
+      ? `<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--text-muted);">Nenhum custo encontrado para os filtros selecionados.</td></tr>`
+      : filtered.map((c) => `<tr>
+          <td><span class="badge badge-em_andamento">${UI.escapeHtml(c.type)}</span></td>
+          <td class="text-sm">${UI.escapeHtml(c.description)}</td>
+          <td class="text-sm">${monthLabel(c.month)}</td>
+          <td style="font-weight:700;color:var(--color-danger);">${brl(c.amount)}</td>
+          <td>
+            <div class="flex gap-2">
+              <button class="btn btn-ghost btn-sm" data-edit-cost="${c.id}" title="Editar">✏️</button>
+              <button class="btn btn-ghost btn-sm" data-delete-cost="${c.id}" title="Excluir">🗑️</button>
+            </div>
+          </td>
+        </tr>`).join("");
+
+    const typeOpts = knownTypes.map((t) =>
+      `<option value="${UI.escapeHtml(t)}" ${t === state.costFilterType ? "selected" : ""}>${UI.escapeHtml(t)}</option>`
+    ).join("");
+
+    wrap.innerHTML = `
+      ${renderCustosSummaryCards()}
+      ${renderProjectionCards()}
+      <div class="card">
+        <div class="card-header" style="flex-wrap:wrap;gap:10px;">
+          <h3 class="card-title">Custos</h3>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+            <select class="form-control" id="f-cost-month" style="width:auto;min-width:150px;">
+              <option value="">Todos os meses</option>
+              ${monthOptions(state.costFilterMonth)}
+            </select>
+            <select class="form-control" id="f-cost-type" style="width:auto;min-width:180px;">
+              <option value="">Todos os tipos</option>
+              ${typeOpts}
+            </select>
+            <button class="btn btn-primary btn-sm" id="btn-new-cost">+ Novo Custo</button>
+          </div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="data-table">
+            <thead><tr><th>Tipo</th><th>Descrição</th><th>Período</th><th>Valor</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+
+    wrap.querySelector("#f-cost-month").addEventListener("change", (e) => { state.costFilterMonth = e.target.value; renderCustosTab(wrap); });
+    wrap.querySelector("#f-cost-type").addEventListener("change", (e) => { state.costFilterType = e.target.value; renderCustosTab(wrap); });
+    wrap.querySelector("#btn-new-cost").addEventListener("click", () => openCostModal(null, () => renderCustosTab(wrap)));
+
+    wrap.querySelectorAll("[data-edit-cost]").forEach((btn) => {
+      btn.addEventListener("click", () => openCostModal(btn.dataset.editCost, () => renderCustosTab(wrap)));
+    });
+    wrap.querySelectorAll("[data-delete-cost]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (UI.confirmDialog("Excluir este custo?")) {
+          DB.Costs.remove(btn.dataset.deleteCost);
+          UI.toast("Custo excluído.", "success");
+          renderCustosTab(wrap);
+        }
       });
     });
   }
@@ -517,6 +649,72 @@
       } else {
         doSave(payload);
       }
+    });
+  }
+
+  function openCostModal(costId, onSaved) {
+    const isNew = !costId;
+    const cost  = costId ? DB.Costs.get(costId) : null;
+    const knownTypes = Array.from(new Set([...COST_TYPES, ...DB.Costs.list().map((c) => c.type)])).filter(Boolean);
+
+    const html = `
+      <div class="modal-header">
+        <h3>${isNew ? "Novo Custo" : "Editar Custo"}</h3>
+        <button class="modal-close" id="cs-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Tipo de custo *</label>
+          <input type="text" class="form-control" id="cs-type" list="cs-type-options" value="${cost ? UI.escapeHtml(cost.type) : ""}" placeholder="Ex: Funcionários, Inteligência Artificial, Banco de Dados..." />
+          <datalist id="cs-type-options">
+            ${knownTypes.map((t) => `<option value="${UI.escapeHtml(t)}"></option>`).join("")}
+          </datalist>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Descrição *</label>
+          <input type="text" class="form-control" id="cs-desc" value="${cost ? UI.escapeHtml(cost.description) : ""}" placeholder="Ex: Salário equipe de dev, Assinatura Claude API..." />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Valor (R$) *</label>
+            <input type="number" class="form-control" id="cs-amount" value="${cost ? cost.amount : ""}" min="0" step="0.01" placeholder="0,00" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Período de referência *</label>
+            <input type="month" class="form-control" id="cs-month" value="${cost ? cost.month : currentYM()}" />
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="cs-cancel">Cancelar</button>
+        <button class="btn btn-primary" id="cs-save">${isNew ? "Criar Custo" : "Salvar Alterações"}</button>
+      </div>`;
+
+    const overlay = UI.showModal(html, { static: true });
+    overlay.querySelector("#cs-close").addEventListener("click", UI.hideModal);
+    overlay.querySelector("#cs-cancel").addEventListener("click", UI.hideModal);
+
+    overlay.querySelector("#cs-save").addEventListener("click", () => {
+      const type        = overlay.querySelector("#cs-type").value.trim();
+      const description = overlay.querySelector("#cs-desc").value.trim();
+      const amount      = parseFloat(overlay.querySelector("#cs-amount").value);
+      const month       = overlay.querySelector("#cs-month").value;
+
+      if (!type || !description || !amount || !month) {
+        UI.toast("Preencha todos os campos obrigatórios (*).", "error");
+        return;
+      }
+
+      const payload = { type, description, amount, month };
+      if (isNew) {
+        DB.Costs.create(payload);
+        UI.toast("Custo cadastrado com sucesso.", "success");
+      } else {
+        DB.Costs.update(cost.id, payload);
+        UI.toast("Custo atualizado.", "success");
+      }
+      UI.hideModal();
+      if (onSaved) onSaved();
     });
   }
 
@@ -874,7 +1072,7 @@
           </div>
         </div>
         <div style="display:flex;gap:4px;margin-bottom:24px;border-bottom:2px solid var(--border-color);">
-          ${[["boletos","💰 Boletos"],["empresas","🏢 Empresas"]].map(([id, label]) => {
+          ${[["boletos","💰 Boletos"],["custos","💸 Custos"],["empresas","🏢 Empresas"]].map(([id, label]) => {
             const active = state.tab === id;
             return `<button data-tab="${id}" style="padding:10px 22px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:600;color:${active ? "var(--color-primary)" : "var(--text-muted)"};border-bottom:2px solid ${active ? "var(--color-primary)" : "transparent"};margin-bottom:-2px;transition:color .2s,border-color .2s;">${label}</button>`;
           }).join("")}
@@ -890,6 +1088,7 @@
 
       const wrap = container.querySelector("#fin-content");
       if (state.tab === "boletos") renderBoletosTab(wrap);
+      else if (state.tab === "custos") renderCustosTab(wrap);
       else renderEmpresasTab(wrap);
     }
 

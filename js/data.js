@@ -63,6 +63,7 @@
     settings: defaultSettings(),
     companies: [],
     boletos: [],
+    costs: [],
     auditLog: [],
     meta: { lastSync: null }
   };
@@ -154,20 +155,25 @@
 
   async function fetchAll() {
     const s = sb();
-    const [profiles, teams, companies, boletos, tasks, activities, audit, settings] =
+    const [profiles, teams, companies, boletos, costs, tasks, activities, audit, settings] =
       await Promise.all([
         s.from("profiles").select("*"),
         s.from("teams").select("id,data"),
         s.from("companies").select("id,data"),
         s.from("boletos").select("id,data"),
+        s.from("costs").select("id,data"),
         s.from("tasks").select("id,data"),
         s.from("activities").select("id,data").order("updated_at", { ascending: false }).limit(50),
         s.from("audit_log").select("id,data").order("updated_at", { ascending: false }).limit(1000),
         s.from("app_settings").select("id,data").eq("id", "main").maybeSingle()
       ]);
 
+    /* "costs" é opcional: se a migration ainda não foi aplicada no projeto,
+       a tabela não existe e a busca vem com erro — isso não pode derrubar
+       o login nem o carregamento do resto do sistema. */
     const failed = [profiles, teams, companies, boletos, tasks, activities, audit].find((r) => r.error);
     if (failed) throw failed.error;
+    if (costs.error) console.warn("[DB] tabela 'costs' indisponível (migration pendente?):", costs.error.message);
 
     const rowData = (r) => (r.data || []).map((x) => x.data);
 
@@ -175,6 +181,7 @@
     db.teams      = rowData(teams);
     db.companies  = rowData(companies);
     db.boletos    = rowData(boletos);
+    db.costs      = costs.error ? [] : rowData(costs);
     db.tasks      = rowData(tasks);
     db.activities = rowData(activities);
     db.auditLog   = rowData(audit);
@@ -521,6 +528,45 @@
   };
 
   /* ------------------------------------------------------------------ */
+  /* CRUD: Custos operacionais                                           */
+  /* ------------------------------------------------------------------ */
+
+  const Costs = {
+    list(filter) {
+      let list = clone(db.costs || []);
+      if (filter) {
+        if (filter.month) list = list.filter((c) => c.month === filter.month);
+        if (filter.type)  list = list.filter((c) => c.type === filter.type);
+      }
+      return list.sort((a, b) => b.month.localeCompare(a.month));
+    },
+    get(id) { return clone((db.costs || []).find((c) => c.id === id)) || null; },
+    create(data) {
+      const cost = Object.assign({ id: uid("cost") }, data);
+      db.costs.push(cost);
+      pushRow("costs", cost);
+      addAuditLog({ action: "Criação", type: "Custo", targetId: cost.id, targetName: cost.description });
+      return clone(cost);
+    },
+    update(id, patch) {
+      const cost = (db.costs || []).find((c) => c.id === id);
+      if (!cost) return null;
+      Object.assign(cost, patch);
+      pushRow("costs", cost);
+      addAuditLog({ action: "Edição", type: "Custo", targetId: id, targetName: cost.description });
+      return clone(cost);
+    },
+    remove(id) {
+      const target = (db.costs || []).find((c) => c.id === id);
+      const tName = target ? target.description : id;
+      db.costs = (db.costs || []).filter((c) => c.id !== id);
+      deleteRow("costs", id);
+      addAuditLog({ action: "Exclusão", type: "Custo", targetId: id, targetName: tName });
+      return true;
+    }
+  };
+
+  /* ------------------------------------------------------------------ */
   /* CRUD: Tarefas                                                       */
   /* ------------------------------------------------------------------ */
 
@@ -774,6 +820,48 @@
         days.push({ date, count });
       }
       return days;
+    },
+
+    /* Custos x recebido no ano corrente, com projeção linear (base: média
+       mensal do ano até agora) para o fechamento do ano — "se continuar
+       assim, quanto vou gastar/lucrar até dezembro". */
+    costAnalysis() {
+      const year = new Date().getFullYear();
+      const currentYM = todayISO().slice(0, 7);
+      const monthsElapsed = Number(currentYM.slice(5, 7)); // Jan..mês atual, inclusive
+      const monthsRemaining = 12 - monthsElapsed;
+
+      const costsYTD = (db.costs || []).filter((c) => c.month >= `${year}-01` && c.month <= currentYM);
+      const totalCostYTD = costsYTD.reduce((s, c) => s + (c.amount || 0), 0);
+      const currentMonthCost = (db.costs || [])
+        .filter((c) => c.month === currentYM)
+        .reduce((s, c) => s + (c.amount || 0), 0);
+
+      const paidYTD = (db.boletos || []).filter(
+        (b) => b.status === "pago" && b.paidDate && b.paidDate >= `${year}-01-01` && b.paidDate <= todayISO()
+      );
+      const totalReceivedYTD = paidYTD.reduce((s, b) => s + (b.amount || 0), 0);
+
+      const avgMonthlyCost = totalCostYTD / monthsElapsed;
+      const avgMonthlyReceived = totalReceivedYTD / monthsElapsed;
+
+      const projectedCost = totalCostYTD + avgMonthlyCost * monthsRemaining;
+      const projectedReceived = totalReceivedYTD + avgMonthlyReceived * monthsRemaining;
+      const projectedNetProfit = projectedReceived - projectedCost;
+
+      return {
+        year,
+        monthsElapsed,
+        monthsRemaining,
+        totalCostYTD,
+        totalReceivedYTD,
+        currentMonthCost,
+        avgMonthlyCost,
+        avgMonthlyReceived,
+        projectedCost,
+        projectedReceived,
+        projectedNetProfit
+      };
     }
   };
 
@@ -995,6 +1083,7 @@
     Teams,
     Companies,
     Boletos,
+    Costs,
     Tasks,
     Activities,
     Audit,
