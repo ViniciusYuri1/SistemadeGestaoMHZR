@@ -531,16 +531,40 @@
   /* CRUD: Custos operacionais                                           */
   /* ------------------------------------------------------------------ */
 
+  /* Custos podem ter duração (ex.: "Software" de Out a Dez): o valor
+     informado é mensal e se repete em cada mês do intervalo [month, endMonth]. */
+  function costMonths(cost) {
+    const start = cost.month;
+    const end = cost.endMonth && cost.endMonth >= start ? cost.endMonth : start;
+    const [sy, sm] = start.split("-").map(Number);
+    const [ey, em] = end.split("-").map(Number);
+    const months = [];
+    let y = sy, m = sm;
+    while (y < ey || (y === ey && m <= em)) {
+      months.push(`${y}-${String(m).padStart(2, "0")}`);
+      m++;
+      if (m > 12) { m = 1; y++; }
+    }
+    return months;
+  }
+
   const Costs = {
     list(filter) {
       let list = clone(db.costs || []);
       if (filter) {
-        if (filter.month) list = list.filter((c) => c.month === filter.month);
+        if (filter.month) list = list.filter((c) => costMonths(c).includes(filter.month));
         if (filter.type)  list = list.filter((c) => c.type === filter.type);
       }
       return list.sort((a, b) => b.month.localeCompare(a.month));
     },
     get(id) { return clone((db.costs || []).find((c) => c.id === id)) || null; },
+    monthsOf(cost) { return costMonths(cost); },
+    totalForMonth(ym) {
+      return (db.costs || []).reduce((s, c) => (costMonths(c).includes(ym) ? s + (c.amount || 0) : s), 0);
+    },
+    totalAll() {
+      return (db.costs || []).reduce((s, c) => s + (c.amount || 0) * costMonths(c).length, 0);
+    },
     create(data) {
       const cost = Object.assign({ id: uid("cost") }, data);
       db.costs.push(cost);
@@ -831,11 +855,11 @@
       const monthsElapsed = Number(currentYM.slice(5, 7)); // Jan..mês atual, inclusive
       const monthsRemaining = 12 - monthsElapsed;
 
-      const costsYTD = (db.costs || []).filter((c) => c.month >= `${year}-01` && c.month <= currentYM);
-      const totalCostYTD = costsYTD.reduce((s, c) => s + (c.amount || 0), 0);
-      const currentMonthCost = (db.costs || [])
-        .filter((c) => c.month === currentYM)
-        .reduce((s, c) => s + (c.amount || 0), 0);
+      let totalCostYTD = 0;
+      for (let mm = 1; mm <= monthsElapsed; mm++) {
+        totalCostYTD += Costs.totalForMonth(`${year}-${String(mm).padStart(2, "0")}`);
+      }
+      const currentMonthCost = Costs.totalForMonth(currentYM);
 
       const paidYTD = (db.boletos || []).filter(
         (b) => b.status === "pago" && b.paidDate && b.paidDate >= `${year}-01-01` && b.paidDate <= todayISO()

@@ -201,12 +201,11 @@
   }
 
   function renderCustosSummaryCards() {
-    const allCosts    = DB.Costs.list();
-    const totalCustos = allCosts.reduce((s, c) => s + (c.amount || 0), 0);
+    const totalCustos = DB.Costs.totalAll();
     const totalRecebido = DB.Boletos.list().filter((b) => b.status === "pago").reduce((s, b) => s + b.amount, 0);
     const lucroLiquido  = totalRecebido - totalCustos;
     const mes = state.costFilterMonth || currentYM();
-    const custosDoMes = allCosts.filter((c) => c.month === mes).reduce((s, c) => s + (c.amount || 0), 0);
+    const custosDoMes = DB.Costs.totalForMonth(mes);
 
     return `<div class="stat-grid">${[
       { icon: "💵", bg: "var(--color-success-light)", color: "var(--color-success)", value: brl(totalRecebido), label: "Total Recebido" },
@@ -247,16 +246,20 @@
     const knownTypes = Array.from(new Set([...COST_TYPES, ...all.map((c) => c.type)])).filter(Boolean);
 
     let filtered = all;
-    if (state.costFilterMonth) filtered = filtered.filter((c) => c.month === state.costFilterMonth);
+    if (state.costFilterMonth) filtered = filtered.filter((c) => DB.Costs.monthsOf(c).includes(state.costFilterMonth));
     if (state.costFilterType)  filtered = filtered.filter((c) => c.type === state.costFilterType);
+
+    const periodLabel = (c) => c.endMonth && c.endMonth !== c.month
+      ? `${monthLabel(c.month)} – ${monthLabel(c.endMonth)}`
+      : monthLabel(c.month);
 
     const rows = filtered.length === 0
       ? `<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--text-muted);">Nenhum custo encontrado para os filtros selecionados.</td></tr>`
       : filtered.map((c) => `<tr>
           <td><span class="badge badge-em_andamento">${UI.escapeHtml(c.type)}</span></td>
           <td class="text-sm">${UI.escapeHtml(c.description)}</td>
-          <td class="text-sm">${monthLabel(c.month)}</td>
-          <td style="font-weight:700;color:var(--color-danger);">${brl(c.amount)}</td>
+          <td class="text-sm">${periodLabel(c)}</td>
+          <td style="font-weight:700;color:var(--color-danger);">${brl(c.amount)}${c.endMonth && c.endMonth !== c.month ? `<div class="text-sm text-muted" style="font-weight:400;">/mês</div>` : ""}</td>
           <td>
             <div class="flex gap-2">
               <button class="btn btn-ghost btn-sm" data-edit-cost="${c.id}" title="Editar">✏️</button>
@@ -680,9 +683,16 @@
             <input type="number" class="form-control" id="cs-amount" value="${cost ? cost.amount : ""}" min="0" step="0.01" placeholder="0,00" />
           </div>
           <div class="form-group">
-            <label class="form-label">Período de referência *</label>
+            <label class="form-label">De *</label>
             <input type="month" class="form-control" id="cs-month" value="${cost ? cost.month : currentYM()}" />
           </div>
+          <div class="form-group">
+            <label class="form-label">Até (opcional)</label>
+            <input type="month" class="form-control" id="cs-end-month" value="${cost && cost.endMonth ? cost.endMonth : ""}" />
+          </div>
+        </div>
+        <div class="text-sm text-muted" style="margin-top:-8px;">
+          Preencha "Até" para um custo que se repete por vários meses (ex: Software de Out a Dez) — o valor acima é considerado mensal e será contado em cada mês do período.
         </div>
       </div>
       <div class="modal-footer">
@@ -699,13 +709,18 @@
       const description = overlay.querySelector("#cs-desc").value.trim();
       const amount      = parseFloat(overlay.querySelector("#cs-amount").value);
       const month       = overlay.querySelector("#cs-month").value;
+      const endMonth    = overlay.querySelector("#cs-end-month").value || null;
 
       if (!type || !description || !amount || !month) {
         UI.toast("Preencha todos os campos obrigatórios (*).", "error");
         return;
       }
+      if (endMonth && endMonth < month) {
+        UI.toast('O mês "Até" não pode ser anterior ao mês "De".', "error");
+        return;
+      }
 
-      const payload = { type, description, amount, month };
+      const payload = { type, description, amount, month, endMonth };
       if (isNew) {
         DB.Costs.create(payload);
         UI.toast("Custo cadastrado com sucesso.", "success");
