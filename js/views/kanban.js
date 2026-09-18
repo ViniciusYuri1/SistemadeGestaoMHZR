@@ -17,18 +17,40 @@
   ];
 
   const PRIORITY_LABELS = { baixa: "Baixa", media: "Média", alta: "Alta", urgente: "Urgente" };
+  const STATUS_LABELS = { backlog: "Backlog", nao_iniciada: "A Fazer", em_andamento: "Em Progresso", em_revisao: "Revisão", concluida: "Concluído" };
 
-  function cardHtml(task, isAdmin) {
+  let scope = null; // "__me__" | "" (todos) | userId — definido por perfil no 1º render
+
+  function blockersLabel(blockers) {
+    return blockers
+      .map((b) => `"${b.title}" (${(DB.Users.get(b.assignee) || {}).name || "—"}, ${STATUS_LABELS[b.status] || b.status})`)
+      .join(", ");
+  }
+
+  function confirmIfBlocked(task, newStatus) {
+    if (!newStatus || newStatus === task.status) return true;
+    if (newStatus === "backlog" || newStatus === "nao_iniciada") return true;
+    const blockers = DB.Tasks.blockers(task);
+    if (!blockers.length) return true;
+    return UI.confirmDialog(
+      `Esta tarefa depende de ${blockersLabel(blockers)}, que ainda não ${blockers.length > 1 ? "foram concluídas" : "foi concluída"}.\n\nDeseja continuar mesmo assim?`
+    );
+  }
+
+  function cardHtml(task, ctx, isAdmin) {
     const assignee = DB.Users.get(task.assignee);
     const overdue = DB.Tasks.isOverdue(task);
+    const isOwner = task.assignee === ctx.user.id;
+    const blockers = DB.Tasks.blockers(task);
     return `
-      <div class="kanban-card" draggable="true" data-id="${task.id}">
+      <div class="kanban-card" draggable="${isAdmin || isOwner}" data-id="${task.id}" data-readonly="${!(isAdmin || isOwner)}">
         <div class="kc-title-row">
           <span class="kc-title">${UI.escapeHtml(task.title)}</span>
           ${isAdmin ? `<button class="kc-delete-btn" data-delete-id="${task.id}" title="Excluir tarefa">🗑️</button>` : ""}
         </div>
         <div class="kc-tags">
           ${(task.tags || []).slice(0, 3).map((t) => `<span class="tag-pill">${UI.escapeHtml(t)}</span>`).join("")}
+          ${blockers.length ? `<span class="tag-pill" style="color:var(--color-danger);" title="Aguardando: ${UI.escapeHtml(blockersLabel(blockers))}">⛔ Aguardando</span>` : ""}
         </div>
         <div class="kc-meta">
           <span class="badge badge-${task.priority}">${PRIORITY_LABELS[task.priority]}</span>
@@ -43,15 +65,25 @@
   function render(container, ctx) {
     const canManage = DB.canManageTasks(ctx.user);
     const canSeeAll = DB.canSeeAllTasks(ctx.user);
-    const tasks = DB.Tasks.list({ assignee: canSeeAll ? undefined : ctx.user.id });
+    if (scope === null) scope = canSeeAll ? "" : "__me__";
+
+    const users = DB.Users.list();
+    let tasks = DB.Tasks.list();
+    if (scope === "__me__") tasks = tasks.filter((t) => t.assignee === ctx.user.id);
+    else if (scope) tasks = tasks.filter((t) => t.assignee === scope);
 
     container.innerHTML = `
       <div class="page-header">
         <div>
           <h1>Quadro Kanban</h1>
-          <p class="page-subtitle">Arraste os cartões entre as colunas para atualizar o status automaticamente.</p>
+          <p class="page-subtitle">Arraste os cartões entre as colunas para atualizar o status automaticamente. Cartões de colegas ficam disponíveis para consulta.</p>
         </div>
         <div class="page-actions">
+          <select id="kb-scope">
+            ${canSeeAll ? "" : `<option value="__me__" ${scope === "__me__" ? "selected" : ""}>Minhas tarefas</option>`}
+            <option value="" ${scope === "" ? "selected" : ""}>Todos os responsáveis</option>
+            ${users.map((u) => `<option value="${u.id}" ${scope === u.id ? "selected" : ""}>${UI.escapeHtml(u.name)}</option>`).join("")}
+          </select>
           ${canManage ? `<button class="btn btn-primary" id="kb-new-task">+ Nova Tarefa</button>` : ""}
         </div>
       </div>
@@ -66,7 +98,7 @@
               <span class="kanban-count">${colTasks.length}</span>
             </div>
             <div class="kanban-cards" data-status="${col.status}">
-              ${colTasks.map((t) => cardHtml(t, canManage)).join("")}
+              ${colTasks.map((t) => cardHtml(t, ctx, canManage)).join("")}
             </div>
           </div>`;
         }).join("")}
@@ -77,6 +109,11 @@
   }
 
   function bindEvents(container, ctx) {
+    container.querySelector("#kb-scope").addEventListener("change", (e) => {
+      scope = e.target.value;
+      render(container, ctx);
+    });
+
     const newBtn = container.querySelector("#kb-new-task");
     if (newBtn) {
       newBtn.addEventListener("click", () => {
@@ -99,6 +136,7 @@
 
     container.querySelectorAll(".kanban-card").forEach((card) => {
       card.addEventListener("dragstart", (e) => {
+        if (card.dataset.readonly === "true") { e.preventDefault(); return; }
         card.classList.add("dragging");
         e.dataTransfer.setData("text/plain", card.dataset.id);
         e.dataTransfer.effectAllowed = "move";
@@ -121,7 +159,7 @@
         const taskId = e.dataTransfer.getData("text/plain");
         const newStatus = column.dataset.status;
         const task = DB.Tasks.get(taskId);
-        if (task && task.status !== newStatus) {
+        if (task && task.status !== newStatus && (DB.canManageTasks(ctx.user) || task.assignee === ctx.user.id) && confirmIfBlocked(task, newStatus)) {
           DB.Tasks.update(taskId, { status: newStatus });
           UI.toast(
             newStatus === "concluida"

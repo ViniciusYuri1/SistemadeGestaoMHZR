@@ -21,23 +21,49 @@
     search: "",
     status: "",
     priority: "",
-    assignee: "",
+    assignee: null, // null = ainda não definido (recebe o padrão por perfil no 1º render)
     company: "",
     sort: "dueDate",
     showArchived: false
   };
+
+  function blockersLabel(blockers) {
+    return blockers
+      .map((b) => `"${b.title}" (${userName(b.assignee)}, ${STATUS_LABELS[b.status] || b.status})`)
+      .join(", ");
+  }
+
+  /* Antes de aplicar uma mudança de status, avisa (sem impedir) se a tarefa
+     ainda depende de outra(s) tarefa(s) não concluídas. */
+  function confirmIfBlocked(task, newStatus) {
+    if (!newStatus || newStatus === task.status) return true;
+    if (newStatus === "backlog" || newStatus === "nao_iniciada") return true;
+    const blockers = DB.Tasks.blockers(task);
+    if (!blockers.length) return true;
+    return UI.confirmDialog(
+      `Esta tarefa depende de ${blockersLabel(blockers)}, que ainda não ${blockers.length > 1 ? "foram concluídas" : "foi concluída"}.\n\nDeseja continuar mesmo assim?`
+    );
+  }
 
   function badge(map, key, extraClass) {
     const labels = map === "status" ? STATUS_LABELS : PRIORITY_LABELS;
     return `<span class="badge badge-${key} ${extraClass || ""}">${labels[key] || key}</span>`;
   }
 
+  /* Todo funcionário enxerga as tarefas do time (a RLS já permite a leitura);
+     o filtro de responsável decide o recorte exibido. Por padrão, quem não
+     gerencia tarefas abre vendo só as suas — mas pode trocar para ver as
+     dos colegas (somente leitura). */
   function getFilteredTasks(ctx) {
-    let tasks = DB.Tasks.list({
-      assignee: DB.canSeeAllTasks(ctx.user) ? undefined : ctx.user.id,
-      includeArchived: state.showArchived
-    });
+    if (state.assignee === null) {
+      state.assignee = DB.canSeeAllTasks(ctx.user) ? "" : "__me__";
+    }
+
+    let tasks = DB.Tasks.list({ includeArchived: state.showArchived });
     if (state.showArchived) tasks = tasks.filter((t) => t.archived);
+
+    if (state.assignee === "__me__") tasks = tasks.filter((t) => t.assignee === ctx.user.id);
+    else if (state.assignee) tasks = tasks.filter((t) => t.assignee === state.assignee);
 
     if (state.search) {
       const q = state.search.toLowerCase();
@@ -50,7 +76,6 @@
     }
     if (state.status) tasks = tasks.filter((t) => t.status === state.status);
     if (state.priority) tasks = tasks.filter((t) => t.priority === state.priority);
-    if (state.assignee) tasks = tasks.filter((t) => t.assignee === state.assignee);
     if (state.company) tasks = tasks.filter((t) => t.companyId === state.company);
 
     const priorityOrder = { urgente: 0, alta: 1, media: 2, baixa: 3 };
@@ -69,8 +94,9 @@
     return u ? u.name : "—";
   }
 
-  function statusSelectHtml(t) {
+  function statusSelectHtml(t, canEdit) {
     const cls = DB.Tasks.isOverdue(t) ? "atrasada" : t.status;
+    if (!canEdit) return badge("status", t.status, cls === "atrasada" ? "atrasada" : "");
     const options = Object.entries(STATUS_LABELS)
       .map(([k, v]) => `<option value="${k}" ${t.status === k ? "selected" : ""}>${v}</option>`)
       .join("");
@@ -99,14 +125,11 @@
           <option value="">Todas as prioridades</option>
           ${Object.entries(PRIORITY_LABELS).map(([k, v]) => `<option value="${k}" ${state.priority === k ? "selected" : ""}>${v}</option>`).join("")}
         </select>
-        ${
-          canSeeAll
-            ? `<select id="f-assignee">
-                <option value="">Todos os responsáveis</option>
-                ${users.map((u) => `<option value="${u.id}" ${state.assignee === u.id ? "selected" : ""}>${u.name}</option>`).join("")}
-              </select>`
-            : ""
-        }
+        <select id="f-assignee">
+          ${canSeeAll ? "" : `<option value="__me__" ${state.assignee === "__me__" ? "selected" : ""}>Minhas tarefas</option>`}
+          <option value="" ${state.assignee === "" ? "selected" : ""}>Todos os responsáveis</option>
+          ${users.map((u) => `<option value="${u.id}" ${state.assignee === u.id ? "selected" : ""}>${UI.escapeHtml(u.name)}</option>`).join("")}
+        </select>
         ${
           companies.length
             ? `<select id="f-company">
@@ -130,6 +153,8 @@
       ? tasks
           .map((t) => {
             const checklistDone = (t.checklist || []).filter((c) => c.done).length;
+            const canEditRow = isAdmin || t.assignee === ctx.user.id;
+            const blockers = DB.Tasks.blockers(t);
             return `
             <tr data-id="${t.id}" class="task-row" style="cursor:pointer;">
               <td>
@@ -137,6 +162,7 @@
                 <div class="text-sm text-muted" style="margin-top:3px;">
                   ${(t.tags || []).slice(0, 2).map((tag) => `<span class="tag-pill">${UI.escapeHtml(tag)}</span>`).join(" ")}
                   ${t.companyId ? `<span class="badge badge-em_andamento" style="font-size:11px;">🏢 ${UI.escapeHtml((DB.Companies.get(t.companyId) || {}).name || "")}</span>` : ""}
+                  ${blockers.length ? `<span class="badge badge-atrasada" style="font-size:11px;" title="Aguardando: ${UI.escapeHtml(blockersLabel(blockers))}">⛔ Aguardando</span>` : ""}
                 </div>
               </td>
               <td>
@@ -146,7 +172,7 @@
                 </div>
               </td>
               <td>${badge("priority", t.priority)}</td>
-              <td>${statusSelectHtml(t)}</td>
+              <td>${statusSelectHtml(t, canEditRow)}</td>
               <td class="text-sm">${UI.formatDate(t.dueDate)}</td>
               <td class="text-sm">${checklistDone}/${(t.checklist || []).length}</td>
               <td>
@@ -228,6 +254,8 @@
     container.querySelectorAll("[data-status-id]").forEach((sel) => {
       sel.addEventListener("change", (e) => {
         const newStatus = e.target.value;
+        const task = DB.Tasks.get(sel.dataset.statusId);
+        if (!confirmIfBlocked(task, newStatus)) { reRender(); return; }
         DB.Tasks.update(sel.dataset.statusId, { status: newStatus });
         UI.toast(newStatus === "concluida" ? "Tarefa concluída e arquivada." : "Status atualizado.", "success");
         reRender();
@@ -269,8 +297,14 @@
     const users = DB.Users.list().filter((u) => u.role !== "company");
     const companies = DB.Companies.list();
     const canEditFull = isAdmin; // admin pode editar tudo; funcionário só status/checklist/comentários/horas
+    const isOwner = !!task && task.assignee === ctx.user.id;
+    // Dono ou admin: mexe em status/checklist/horas. Colega visitando a tarefa: só acompanha e comenta.
+    const canEditProgress = canEditFull || isOwner || isNew;
+    const blockers = task ? DB.Tasks.blockers(task) : [];
+    const dependents = task ? DB.Tasks.dependents(task.id).filter((d) => d.status !== "concluida") : [];
 
     let draftChecklist = task ? JSON.parse(JSON.stringify(task.checklist || [])) : [];
+    let draftDependsOn = task ? (task.dependsOn || []).slice() : [];
 
     function checklistHtml() {
       if (!draftChecklist.length) {
@@ -280,7 +314,7 @@
         .map(
           (item, idx) => `
         <div class="flex items-center gap-2" style="margin-bottom:6px;">
-          <input type="checkbox" data-checklist-idx="${idx}" ${item.done ? "checked" : ""} style="width:16px;height:16px;accent-color:var(--color-primary);" />
+          <input type="checkbox" data-checklist-idx="${idx}" ${item.done ? "checked" : ""} ${canEditProgress ? "" : "disabled"} style="width:16px;height:16px;accent-color:var(--color-primary);" />
           <span style="flex:1; ${item.done ? "text-decoration:line-through; color:var(--text-muted);" : ""}">${UI.escapeHtml(item.text)}</span>
           ${isAdmin ? `<button type="button" class="btn btn-ghost btn-sm" data-remove-checklist="${idx}">✕</button>` : ""}
         </div>`
@@ -317,7 +351,7 @@
           (a, idx) => `
         <div class="flex items-center gap-2" style="margin-bottom:6px;">
           📎 <span class="text-sm" style="flex:1;">${UI.escapeHtml(a.name)}</span>
-          <button type="button" class="btn btn-ghost btn-sm" data-remove-attachment="${idx}">✕</button>
+          ${canEditProgress ? `<button type="button" class="btn btn-ghost btn-sm" data-remove-attachment="${idx}">✕</button>` : ""}
         </div>`
         )
         .join("");
@@ -329,6 +363,16 @@
         <button class="modal-close" id="tm-close">✕</button>
       </div>
       <div class="modal-body">
+        ${blockers.length ? `
+        <div class="form-group" style="background:var(--color-danger-light);border:1px solid var(--color-danger);border-radius:var(--radius-md);padding:10px 14px;">
+          <strong style="color:var(--color-danger);">⛔ Aguardando outra(s) tarefa(s)</strong>
+          <div class="text-sm" style="margin-top:4px;">${UI.escapeHtml(blockersLabel(blockers))}</div>
+        </div>` : ""}
+        ${dependents.length ? `
+        <div class="form-group" style="background:var(--color-warning-light);border:1px solid var(--color-warning);border-radius:var(--radius-md);padding:10px 14px;">
+          <strong style="color:var(--color-warning);">👀 ${dependents.length} tarefa(s) esperam a conclusão desta</strong>
+          <div class="text-sm" style="margin-top:4px;">${dependents.map((d) => `"${UI.escapeHtml(d.title)}" (${UI.escapeHtml(userName(d.assignee))})`).join(", ")}</div>
+        </div>` : ""}
         <form id="task-form">
           <div class="form-group">
             <label class="form-label">Título</label>
@@ -357,13 +401,13 @@
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Status</label>
-              <select class="form-control" id="tm-status">
+              <select class="form-control" id="tm-status" ${canEditProgress ? "" : "disabled"}>
                 ${Object.entries(STATUS_LABELS).map(([k, v]) => `<option value="${k}" ${task && task.status === k ? "selected" : ""}>${v}</option>`).join("")}
               </select>
             </div>
             <div class="form-group">
               <label class="form-label">Horas registradas</label>
-              <input type="number" min="0" step="0.5" class="form-control" id="tm-hours" value="${task ? task.timeLogged || 0 : 0}" />
+              <input type="number" min="0" step="0.5" class="form-control" id="tm-hours" value="${task ? task.timeLogged || 0 : 0}" ${canEditProgress ? "" : "readonly"} />
             </div>
           </div>
 
@@ -397,6 +441,25 @@
             <div style="padding:9px 14px;background:var(--bg-surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);font-size:14px;">${UI.escapeHtml((companies.find(c => c.id === task.companyId) || {}).name || "—")}</div>
           </div>` : "")}
 
+          ${canEditFull ? `
+          <div class="form-group">
+            <label class="form-label">🔗 Depende de (aguardar concluir antes)</label>
+            <select class="form-control" id="tm-dependson" multiple size="4">
+              ${DB.Tasks.list({ includeArchived: false })
+                .filter((t) => t.id !== (task && task.id))
+                .map((t) => `<option value="${t.id}" ${draftDependsOn.includes(t.id) ? "selected" : ""}>${UI.escapeHtml(t.title)} — ${UI.escapeHtml(userName(t.assignee))} (${STATUS_LABELS[t.status] || t.status})</option>`)
+                .join("")}
+            </select>
+            <div class="text-sm text-muted" style="margin-top:4px;">Ctrl/Cmd + clique para selecionar mais de uma. Enquanto elas não forem concluídas, esta tarefa aparece como "aguardando".</div>
+          </div>` : (task && (task.dependsOn || []).length ? `
+          <div class="form-group">
+            <label class="form-label">🔗 Depende de</label>
+            <div class="text-sm">${(task.dependsOn || []).map((depId) => {
+              const dep = DB.Tasks.get(depId);
+              return dep ? `${UI.escapeHtml(dep.title)} — ${UI.escapeHtml(userName(dep.assignee))} (${STATUS_LABELS[dep.status] || dep.status})` : null;
+            }).filter(Boolean).join(", ") || "—"}</div>
+          </div>` : "")}
+
           <div class="form-group">
             <label class="form-label">Checklist</label>
             <div id="tm-checklist-list">${checklistHtml()}</div>
@@ -416,10 +479,11 @@
           <div class="form-group">
             <label class="form-label">Anexos</label>
             <div id="tm-attachments-list">${attachmentsHtml()}</div>
+            ${canEditProgress ? `
             <div class="flex gap-2" style="margin-top:8px;">
               <input type="text" class="form-control" id="tm-attachment-new" placeholder="Nome do arquivo (simulação de upload)..." />
               <button type="button" class="btn btn-secondary btn-sm" id="tm-attachment-add">Anexar</button>
-            </div>
+            </div>` : ""}
           </div>
 
           <div class="form-group">
@@ -435,8 +499,8 @@
         </form>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" id="tm-cancel">Cancelar</button>
-        <button class="btn btn-primary" id="tm-save">${isNew ? "Criar Tarefa" : "Salvar Alterações"}</button>
+        <button class="btn btn-secondary" id="tm-cancel">${canEditProgress ? "Cancelar" : "Fechar"}</button>
+        ${canEditProgress ? `<button class="btn btn-primary" id="tm-save">${isNew ? "Criar Tarefa" : "Salvar Alterações"}</button>` : ""}
       </div>
     `;
 
@@ -528,12 +592,16 @@
       });
     }
 
-    overlay.querySelector("#tm-save").addEventListener("click", () => {
+    const saveBtn = overlay.querySelector("#tm-save");
+    if (saveBtn) saveBtn.addEventListener("click", () => {
       const title = overlay.querySelector("#tm-title").value.trim();
       if (!title) {
         UI.toast("Informe um título para a tarefa.", "error");
         return;
       }
+
+      const newStatus = overlay.querySelector("#tm-status").value;
+      if (task && !confirmIfBlocked(task, newStatus)) return;
 
       const payload = canEditFull
         ? {
@@ -541,16 +609,17 @@
             description: overlay.querySelector("#tm-desc").value.trim(),
             assignee: overlay.querySelector("#tm-assignee").value,
             priority: overlay.querySelector("#tm-priority").value,
-            status: overlay.querySelector("#tm-status").value,
+            status: newStatus,
             startDate: overlay.querySelector("#tm-start").value,
             dueDate: overlay.querySelector("#tm-due").value,
             tags: overlay.querySelector("#tm-tags").value.split(",").map((s) => s.trim()).filter(Boolean),
             timeLogged: Number(overlay.querySelector("#tm-hours").value) || 0,
             checklist: draftChecklist,
-            companyId: (overlay.querySelector("#tm-company") && overlay.querySelector("#tm-company").value) || null
+            companyId: (overlay.querySelector("#tm-company") && overlay.querySelector("#tm-company").value) || null,
+            dependsOn: Array.from(overlay.querySelector("#tm-dependson").selectedOptions).map((o) => o.value)
           }
         : {
-            status: overlay.querySelector("#tm-status").value,
+            status: newStatus,
             timeLogged: Number(overlay.querySelector("#tm-hours").value) || 0,
             checklist: draftChecklist
           };

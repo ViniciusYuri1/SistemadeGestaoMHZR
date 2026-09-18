@@ -615,6 +615,7 @@
           checklist: [],
           comments: [],
           attachments: [],
+          dependsOn: [],
           timeLogged: 0,
           archived: false,
           createdAt: todayISO(),
@@ -686,6 +687,22 @@
     isOverdue(task) {
       if (task.status === "concluida") return false;
       return task.dueDate < todayISO();
+    },
+
+    /* Tarefas das quais `idOrTask` depende e que ainda não foram concluídas
+       (o que a mantém "bloqueada" no fluxo de trabalho entre funcionários). */
+    blockers(idOrTask) {
+      const task = typeof idOrTask === "string" ? db.tasks.find((t) => t.id === idOrTask) : idOrTask;
+      if (!task || !task.dependsOn || !task.dependsOn.length) return [];
+      return task.dependsOn
+        .map((depId) => db.tasks.find((t) => t.id === depId))
+        .filter((dep) => dep && dep.status !== "concluida")
+        .map(clone);
+    },
+
+    /* Tarefas (de qualquer responsável) que dependem de `id`. */
+    dependents(id) {
+      return db.tasks.filter((t) => (t.dependsOn || []).includes(id)).map(clone);
     }
   };
 
