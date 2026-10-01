@@ -642,7 +642,7 @@
           checklist: [],
           comments: [],
           attachments: [],
-          dependsOn: [],
+          handoffs: [],
           timeLogged: 0,
           archived: false,
           createdAt: todayISO(),
@@ -650,6 +650,8 @@
         },
         normalizeTaskCompanies(data)
       );
+      /* RLS só devolve a linha ao criador se ele estiver em participants (upsert relê a linha) */
+      task.participants = uniq([currentUser && currentUser.id, task.assignee]);
       db.tasks.push(task);
       pushRow("tasks", task);
       logActivity(currentUser && currentUser.id, `criou a tarefa "${task.title}"`);
@@ -668,6 +670,7 @@
 
       Object.assign(task, patch, { updatedAt: todayISO() });
       normalizeTaskCompanies(task);
+      task.participants = uniq((task.participants || []).concat([currentUser && currentUser.id, task.assignee]));
       pushRow("tasks", task);
       addAuditLog(Object.assign({ action: "Edição", type: "Tarefa", targetId: id, targetName: task.title }, taskAuditCompany(task)));
       return clone(task);
@@ -688,6 +691,8 @@
       copy.id = uid("task");
       copy.title = original.title + " (cópia)";
       copy.status = "nao_iniciada";
+      copy.handoffs = [];
+      copy.participants = uniq([currentUser && currentUser.id, copy.assignee]);
       copy.createdAt = todayISO();
       copy.updatedAt = todayISO();
       db.tasks.push(copy);
@@ -715,22 +720,41 @@
       return task.dueDate < todayISO();
     },
 
-    /* Tarefas das quais `idOrTask` depende e que ainda não foram concluídas
-       (o que a mantém "bloqueada" no fluxo de trabalho entre funcionários). */
-    blockers(idOrTask) {
-      const task = typeof idOrTask === "string" ? db.tasks.find((t) => t.id === idOrTask) : idOrTask;
-      if (!task || !task.dependsOn || !task.dependsOn.length) return [];
-      return task.dependsOn
-        .map((depId) => db.tasks.find((t) => t.id === depId))
-        .filter((dep) => dep && dep.status !== "concluida")
-        .map(clone);
-    },
-
-    /* Tarefas (de qualquer responsável) que dependem de `id`. */
-    dependents(id) {
-      return db.tasks.filter((t) => (t.dependsOn || []).includes(id)).map(clone);
+    /* Passa a tarefa para outro funcionário; quem encaminhou continua em
+       participants e segue vendo/comentando, mas só o novo responsável edita. */
+    forward(id, toUserId, note, progress) {
+      const task = db.tasks.find((t) => t.id === id);
+      if (!task || !toUserId || toUserId === task.assignee) return null;
+      const fromUserId = task.assignee;
+      task.handoffs = (task.handoffs || []).concat([{
+        from: fromUserId,
+        to: toUserId,
+        by: currentUser && currentUser.id,
+        note: note || "",
+        date: new Date().toISOString()
+      }]);
+      Object.assign(task, progress || {}, {
+        assignee: toUserId,
+        status: "nao_iniciada",
+        archived: false,
+        updatedAt: todayISO()
+      });
+      task.participants = uniq((task.participants || []).concat([currentUser && currentUser.id, fromUserId, toUserId]));
+      pushRow("tasks", task);
+      const fromName = (db.users.find((u) => u.id === fromUserId) || {}).name || "—";
+      const toName = (db.users.find((u) => u.id === toUserId) || {}).name || "—";
+      logActivity(currentUser && currentUser.id, `encaminhou a tarefa "${task.title}" para ${toName}`);
+      addAuditLog(Object.assign(
+        { action: "Encaminhamento", type: "Tarefa", targetId: id, targetName: task.title, details: `${fromName} → ${toName}${note ? `: ${note}` : ""}` },
+        taskAuditCompany(task)
+      ));
+      return clone(task);
     }
   };
+
+  function uniq(list) {
+    return Array.from(new Set(list.filter(Boolean)));
+  }
 
   /* ------------------------------------------------------------------ */
   /* Atividades recentes + auditoria                                     */

@@ -27,22 +27,10 @@
     showArchived: false
   };
 
-  function blockersLabel(blockers) {
-    return blockers
-      .map((b) => `"${b.title}" (${userName(b.assignee)}, ${STATUS_LABELS[b.status] || b.status})`)
-      .join(", ");
-  }
-
-  /* Antes de aplicar uma mudança de status, avisa (sem impedir) se a tarefa
-     ainda depende de outra(s) tarefa(s) não concluídas. */
-  function confirmIfBlocked(task, newStatus) {
-    if (!newStatus || newStatus === task.status) return true;
-    if (newStatus === "backlog" || newStatus === "nao_iniciada") return true;
-    const blockers = DB.Tasks.blockers(task);
-    if (!blockers.length) return true;
-    return UI.confirmDialog(
-      `Esta tarefa depende de ${blockersLabel(blockers)}, que ainda não ${blockers.length > 1 ? "foram concluídas" : "foi concluída"}.\n\nDeseja continuar mesmo assim?`
-    );
+  function lastHandoff(task) {
+    const list = task.handoffs || [];
+    const last = list[list.length - 1];
+    return last && last.to === task.assignee ? last : null;
   }
 
   function badge(map, key, extraClass) {
@@ -63,6 +51,7 @@
     if (state.showArchived) tasks = tasks.filter((t) => t.archived);
 
     if (state.assignee === "__me__") tasks = tasks.filter((t) => t.assignee === ctx.user.id);
+    else if (state.assignee === "__involved__") tasks = tasks.filter((t) => t.assignee !== ctx.user.id && (t.participants || []).includes(ctx.user.id));
     else if (state.assignee) tasks = tasks.filter((t) => t.assignee === state.assignee);
 
     if (state.search) {
@@ -127,6 +116,7 @@
         </select>
         <select id="f-assignee">
           ${canSeeAll ? "" : `<option value="__me__" ${state.assignee === "__me__" ? "selected" : ""}>Minhas tarefas</option>`}
+          <option value="__involved__" ${state.assignee === "__involved__" ? "selected" : ""}>Que encaminhei / participei</option>
           <option value="" ${state.assignee === "" ? "selected" : ""}>Todos os responsáveis</option>
           ${users.map((u) => `<option value="${u.id}" ${state.assignee === u.id ? "selected" : ""}>${UI.escapeHtml(u.name)}</option>`).join("")}
         </select>
@@ -154,7 +144,7 @@
           .map((t) => {
             const checklistDone = (t.checklist || []).filter((c) => c.done).length;
             const canEditRow = isAdmin || t.assignee === ctx.user.id;
-            const blockers = DB.Tasks.blockers(t);
+            const handoff = lastHandoff(t);
             return `
             <tr data-id="${t.id}" class="task-row" style="cursor:pointer;">
               <td>
@@ -162,7 +152,7 @@
                 <div class="text-sm text-muted" style="margin-top:3px;">
                   ${(t.tags || []).slice(0, 2).map((tag) => `<span class="tag-pill">${UI.escapeHtml(tag)}</span>`).join(" ")}
                   ${DB.Tasks.companyNamesOf(t).map((name) => `<span class="badge badge-em_andamento" style="font-size:11px;">🏢 ${UI.escapeHtml(name)}</span>`).join(" ")}
-                  ${blockers.length ? `<span class="badge badge-atrasada" style="font-size:11px;" title="Aguardando: ${UI.escapeHtml(blockersLabel(blockers))}">⛔ Aguardando</span>` : ""}
+                  ${handoff ? `<span class="badge badge-em_revisao" style="font-size:11px;" title="${UI.escapeHtml(handoff.note || "")}">📨 Recebida de ${UI.escapeHtml(userName(handoff.from))}</span>` : ""}
                 </div>
               </td>
               <td>
@@ -254,8 +244,6 @@
     container.querySelectorAll("[data-status-id]").forEach((sel) => {
       sel.addEventListener("change", (e) => {
         const newStatus = e.target.value;
-        const task = DB.Tasks.get(sel.dataset.statusId);
-        if (!confirmIfBlocked(task, newStatus)) { reRender(); return; }
         DB.Tasks.update(sel.dataset.statusId, { status: newStatus });
         UI.toast(newStatus === "concluida" ? "Tarefa concluída e arquivada." : "Status atualizado.", "success");
         reRender();
@@ -300,12 +288,25 @@
     const isOwner = !!task && task.assignee === ctx.user.id;
     // Dono ou admin: mexe em status/checklist/horas. Colega visitando a tarefa: só acompanha e comenta.
     const canEditProgress = canEditFull || isOwner || isNew;
-    const blockers = task ? DB.Tasks.blockers(task) : [];
-    const dependents = task ? DB.Tasks.dependents(task.id).filter((d) => d.status !== "concluida") : [];
+    const canForward = !isNew && (isOwner || isAdmin);
+    const handoffs = task ? task.handoffs || [] : [];
+    const receivedHandoff = task && isOwner ? lastHandoff(task) : null;
 
     let draftChecklist = task ? JSON.parse(JSON.stringify(task.checklist || [])) : [];
-    let draftDependsOn = task ? (task.dependsOn || []).slice() : [];
     const taskCompanyIds = DB.Tasks.companyIdsOf(task);
+
+    function handoffsHtml() {
+      return handoffs
+        .slice()
+        .reverse()
+        .map((h) => `
+          <div style="padding:8px 0;border-bottom:1px solid var(--border-color);">
+            <div class="text-sm"><strong>${UI.escapeHtml(userName(h.from))}</strong> → <strong>${UI.escapeHtml(userName(h.to))}</strong>
+              <span class="text-muted">· ${UI.formatDateTime(h.date)}</span></div>
+            ${h.note ? `<div class="text-sm" style="margin-top:4px;white-space:pre-wrap;">${UI.escapeHtml(h.note)}</div>` : ""}
+          </div>`)
+        .join("");
+    }
 
     function checklistHtml() {
       if (!draftChecklist.length) {
@@ -364,16 +365,13 @@
         <button class="modal-close" id="tm-close">✕</button>
       </div>
       <div class="modal-body">
-        ${blockers.length ? `
-        <div class="form-group" style="background:var(--color-danger-light);border:1px solid var(--color-danger);border-radius:var(--radius-md);padding:10px 14px;">
-          <strong style="color:var(--color-danger);">⛔ Aguardando outra(s) tarefa(s)</strong>
-          <div class="text-sm" style="margin-top:4px;">${UI.escapeHtml(blockersLabel(blockers))}</div>
-        </div>` : ""}
-        ${dependents.length ? `
+        ${receivedHandoff ? `
         <div class="form-group" style="background:var(--color-warning-light);border:1px solid var(--color-warning);border-radius:var(--radius-md);padding:10px 14px;">
-          <strong style="color:var(--color-warning);">👀 ${dependents.length} tarefa(s) esperam a conclusão desta</strong>
-          <div class="text-sm" style="margin-top:4px;">${dependents.map((d) => `"${UI.escapeHtml(d.title)}" (${UI.escapeHtml(userName(d.assignee))})`).join(", ")}</div>
+          <strong style="color:var(--color-warning);">📨 ${UI.escapeHtml(userName(receivedHandoff.from))} encaminhou esta tarefa para você</strong>
+          ${receivedHandoff.note ? `<div class="text-sm" style="margin-top:4px;white-space:pre-wrap;">${UI.escapeHtml(receivedHandoff.note)}</div>` : ""}
         </div>` : ""}
+        ${task && !isOwner && (task.participants || []).includes(ctx.user.id) && !isAdmin ? `
+        <div class="form-group text-sm text-muted">Você participou desta tarefa. Agora ela está com <strong>${UI.escapeHtml(userName(task.assignee))}</strong> — você pode acompanhar e comentar.</div>` : ""}
         <form id="task-form">
           <div class="form-group">
             <label class="form-label">Título</label>
@@ -446,24 +444,25 @@
             <div style="padding:9px 14px;background:var(--bg-surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);font-size:14px;">${UI.escapeHtml(DB.Tasks.companyNamesOf(task).join(", ") || "—")}</div>
           </div>` : "")}
 
-          ${canEditFull ? `
-          <div class="form-group">
-            <label class="form-label">🔗 Depende de (aguardar concluir antes)</label>
-            <select class="form-control" id="tm-dependson" multiple size="4">
-              ${DB.Tasks.list({ includeArchived: false })
-                .filter((t) => t.id !== (task && task.id))
-                .map((t) => `<option value="${t.id}" ${draftDependsOn.includes(t.id) ? "selected" : ""}>${UI.escapeHtml(t.title)} — ${UI.escapeHtml(userName(t.assignee))} (${STATUS_LABELS[t.status] || t.status})</option>`)
-                .join("")}
+          ${canForward ? `
+          <div class="form-group" style="padding:12px 14px;background:var(--bg-surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);">
+            <label class="form-label">📨 Encaminhar para outro funcionário</label>
+            <div class="text-sm text-muted" style="margin-bottom:8px;">Terminou a sua parte? Passe a tarefa adiante. Ela volta para "A Fazer" com o novo responsável, e você continua podendo acompanhar e comentar.</div>
+            <select class="form-control" id="tm-forward-to" style="margin-bottom:8px;">
+              <option value="">— Selecione o funcionário —</option>
+              ${users.filter((u) => u.id !== task.assignee).map((u) => `<option value="${u.id}">${UI.escapeHtml(u.name)}</option>`).join("")}
             </select>
-            <div class="text-sm text-muted" style="margin-top:4px;">Ctrl/Cmd + clique para selecionar mais de uma. Enquanto elas não forem concluídas, esta tarefa aparece como "aguardando".</div>
-          </div>` : (task && (task.dependsOn || []).length ? `
+            <textarea class="form-control" id="tm-forward-note" rows="2" placeholder="O que já foi feito e o que falta (opcional)"></textarea>
+            <div style="margin-top:8px;text-align:right;">
+              <button type="button" class="btn btn-primary btn-sm" id="tm-forward-btn">Encaminhar</button>
+            </div>
+          </div>` : ""}
+
+          ${handoffs.length ? `
           <div class="form-group">
-            <label class="form-label">🔗 Depende de</label>
-            <div class="text-sm">${(task.dependsOn || []).map((depId) => {
-              const dep = DB.Tasks.get(depId);
-              return dep ? `${UI.escapeHtml(dep.title)} — ${UI.escapeHtml(userName(dep.assignee))} (${STATUS_LABELS[dep.status] || dep.status})` : null;
-            }).filter(Boolean).join(", ") || "—"}</div>
-          </div>` : "")}
+            <label class="form-label">🔁 Histórico de encaminhamentos</label>
+            <div style="max-height:160px;overflow-y:auto;">${handoffsHtml()}</div>
+          </div>` : ""}
 
           <div class="form-group">
             <label class="form-label">Checklist</label>
@@ -613,6 +612,23 @@
       });
     }
 
+    const forwardBtn = overlay.querySelector("#tm-forward-btn");
+    if (forwardBtn) forwardBtn.addEventListener("click", () => {
+      const toId = overlay.querySelector("#tm-forward-to").value;
+      if (!toId) {
+        UI.toast("Selecione para quem encaminhar a tarefa.", "error");
+        return;
+      }
+      if (!UI.confirmDialog(`Encaminhar "${task.title}" para ${userName(toId)}?`)) return;
+      DB.Tasks.forward(task.id, toId, overlay.querySelector("#tm-forward-note").value.trim(), {
+        timeLogged: Number(overlay.querySelector("#tm-hours").value) || 0,
+        checklist: draftChecklist
+      });
+      UI.toast(`Tarefa encaminhada para ${userName(toId)}.`, "success");
+      UI.hideModal();
+      if (onSaved) onSaved();
+    });
+
     const saveBtn = overlay.querySelector("#tm-save");
     if (saveBtn) saveBtn.addEventListener("click", () => {
       const title = overlay.querySelector("#tm-title").value.trim();
@@ -622,7 +638,6 @@
       }
 
       const newStatus = overlay.querySelector("#tm-status").value;
-      if (task && !confirmIfBlocked(task, newStatus)) return;
 
       const payload = canEditFull
         ? {
@@ -638,8 +653,7 @@
             checklist: draftChecklist,
             companyIds: overlay.querySelector("#tm-company-list")
               ? Array.from(overlay.querySelectorAll(".tm-company-cb:checked")).map((cb) => cb.value)
-              : taskCompanyIds,
-            dependsOn: Array.from(overlay.querySelector("#tm-dependson").selectedOptions).map((o) => o.value)
+              : taskCompanyIds
           }
         : {
             status: newStatus,

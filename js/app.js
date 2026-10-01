@@ -97,21 +97,16 @@
     const dot = document.getElementById("notif-dot");
     const items = [];
 
-    /* Workflow entre funcionários: minhas tarefas travadas por outra pessoa,
-       e tarefas minhas que estão travando o trabalho de um colega. */
-    const myOpenTasks = DB.Tasks.list({ assignee: user.id }).filter((t) => t.status !== "concluida");
-    myOpenTasks.forEach((t) => {
-      const blockers = DB.Tasks.blockers(t);
-      if (!blockers.length) return;
-      const names = blockers.map((b) => `${UI.escapeHtml(b.title)} (${UI.escapeHtml((DB.Users.get(b.assignee) || {}).name || "—")})`).join(", ");
-      items.push(`<div class="notif-item">⛔ <strong>${UI.escapeHtml(t.title)}</strong> aguarda: ${names}<div class="notif-time">Você ainda não pode avançar esta tarefa</div></div>`);
-    });
-    myOpenTasks.forEach((t) => {
-      const waiting = DB.Tasks.dependents(t.id).filter((d) => d.status !== "concluida" && d.assignee !== user.id);
-      if (!waiting.length) return;
-      const names = waiting.map((d) => `${UI.escapeHtml(d.title)} (${UI.escapeHtml((DB.Users.get(d.assignee) || {}).name || "—")})`).join(", ");
-      items.push(`<div class="notif-item">👀 Colegas aguardam você concluir <strong>${UI.escapeHtml(t.title)}</strong> para seguir com: ${names}</div>`);
-    });
+    /* Tarefas encaminhadas para mim que ainda não comecei */
+    DB.Tasks.list({ assignee: user.id })
+      .filter((t) => t.status === "nao_iniciada")
+      .forEach((t) => {
+        const handoffs = t.handoffs || [];
+        const last = handoffs[handoffs.length - 1];
+        if (!last || last.to !== user.id) return;
+        const fromName = (DB.Users.get(last.from) || {}).name || "—";
+        items.push(`<div class="notif-item">📨 <strong>${UI.escapeHtml(fromName)}</strong> encaminhou <strong>${UI.escapeHtml(t.title)}</strong> para você${last.note ? `<div class="notif-time">${UI.escapeHtml(last.note)}</div>` : ""}</div>`);
+      });
 
     /* Notificações para admin: empresas com acesso ativo mas sem contrato */
     if (user.role === "admin") {

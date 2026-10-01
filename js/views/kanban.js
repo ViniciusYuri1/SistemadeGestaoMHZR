@@ -17,31 +17,16 @@
   ];
 
   const PRIORITY_LABELS = { baixa: "Baixa", media: "Média", alta: "Alta", urgente: "Urgente" };
-  const STATUS_LABELS = { backlog: "Backlog", nao_iniciada: "A Fazer", em_andamento: "Em Progresso", em_revisao: "Revisão", concluida: "Concluído" };
 
   let scope = null; // "__me__" | "" (todos) | userId — definido por perfil no 1º render
-
-  function blockersLabel(blockers) {
-    return blockers
-      .map((b) => `"${b.title}" (${(DB.Users.get(b.assignee) || {}).name || "—"}, ${STATUS_LABELS[b.status] || b.status})`)
-      .join(", ");
-  }
-
-  function confirmIfBlocked(task, newStatus) {
-    if (!newStatus || newStatus === task.status) return true;
-    if (newStatus === "backlog" || newStatus === "nao_iniciada") return true;
-    const blockers = DB.Tasks.blockers(task);
-    if (!blockers.length) return true;
-    return UI.confirmDialog(
-      `Esta tarefa depende de ${blockersLabel(blockers)}, que ainda não ${blockers.length > 1 ? "foram concluídas" : "foi concluída"}.\n\nDeseja continuar mesmo assim?`
-    );
-  }
 
   function cardHtml(task, ctx, isAdmin) {
     const assignee = DB.Users.get(task.assignee);
     const overdue = DB.Tasks.isOverdue(task);
     const isOwner = task.assignee === ctx.user.id;
-    const blockers = DB.Tasks.blockers(task);
+    const handoffs = task.handoffs || [];
+    const handoff = handoffs.length && handoffs[handoffs.length - 1].to === task.assignee ? handoffs[handoffs.length - 1] : null;
+    const handoffFrom = handoff ? (DB.Users.get(handoff.from) || {}).name || "—" : "";
     return `
       <div class="kanban-card" draggable="${isAdmin || isOwner}" data-id="${task.id}" data-readonly="${!(isAdmin || isOwner)}">
         <div class="kc-title-row">
@@ -50,7 +35,7 @@
         </div>
         <div class="kc-tags">
           ${(task.tags || []).slice(0, 3).map((t) => `<span class="tag-pill">${UI.escapeHtml(t)}</span>`).join("")}
-          ${blockers.length ? `<span class="tag-pill" style="color:var(--color-danger);" title="Aguardando: ${UI.escapeHtml(blockersLabel(blockers))}">⛔ Aguardando</span>` : ""}
+          ${handoff ? `<span class="tag-pill" title="${UI.escapeHtml(handoff.note || "")}">📨 de ${UI.escapeHtml(handoffFrom)}</span>` : ""}
         </div>
         <div class="kc-meta">
           <span class="badge badge-${task.priority}">${PRIORITY_LABELS[task.priority]}</span>
@@ -159,7 +144,7 @@
         const taskId = e.dataTransfer.getData("text/plain");
         const newStatus = column.dataset.status;
         const task = DB.Tasks.get(taskId);
-        if (task && task.status !== newStatus && (DB.canManageTasks(ctx.user) || task.assignee === ctx.user.id) && confirmIfBlocked(task, newStatus)) {
+        if (task && task.status !== newStatus && (DB.canManageTasks(ctx.user) || task.assignee === ctx.user.id)) {
           DB.Tasks.update(taskId, { status: newStatus });
           UI.toast(
             newStatus === "concluida"
