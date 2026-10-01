@@ -76,7 +76,7 @@
     }
     if (state.status) tasks = tasks.filter((t) => t.status === state.status);
     if (state.priority) tasks = tasks.filter((t) => t.priority === state.priority);
-    if (state.company) tasks = tasks.filter((t) => t.companyId === state.company);
+    if (state.company) tasks = tasks.filter((t) => DB.Tasks.companyIdsOf(t).includes(state.company));
 
     const priorityOrder = { urgente: 0, alta: 1, media: 2, baixa: 3 };
     tasks.sort((a, b) => {
@@ -161,7 +161,7 @@
                 <div style="font-weight:700;">${UI.escapeHtml(t.title)}</div>
                 <div class="text-sm text-muted" style="margin-top:3px;">
                   ${(t.tags || []).slice(0, 2).map((tag) => `<span class="tag-pill">${UI.escapeHtml(tag)}</span>`).join(" ")}
-                  ${t.companyId ? `<span class="badge badge-em_andamento" style="font-size:11px;">🏢 ${UI.escapeHtml((DB.Companies.get(t.companyId) || {}).name || "")}</span>` : ""}
+                  ${DB.Tasks.companyNamesOf(t).map((name) => `<span class="badge badge-em_andamento" style="font-size:11px;">🏢 ${UI.escapeHtml(name)}</span>`).join(" ")}
                   ${blockers.length ? `<span class="badge badge-atrasada" style="font-size:11px;" title="Aguardando: ${UI.escapeHtml(blockersLabel(blockers))}">⛔ Aguardando</span>` : ""}
                 </div>
               </td>
@@ -305,6 +305,7 @@
 
     let draftChecklist = task ? JSON.parse(JSON.stringify(task.checklist || [])) : [];
     let draftDependsOn = task ? (task.dependsOn || []).slice() : [];
+    const taskCompanyIds = DB.Tasks.companyIdsOf(task);
 
     function checklistHtml() {
       if (!draftChecklist.length) {
@@ -429,16 +430,20 @@
 
           ${canEditFull && companies.length ? `
           <div class="form-group">
-            <label class="form-label">🏢 Empresa vinculada (opcional)</label>
-            <select class="form-control" id="tm-company">
-              <option value="">— Nenhuma empresa —</option>
-              ${companies.map((c) => `<option value="${c.id}" ${task && task.companyId === c.id ? "selected" : ""}>${UI.escapeHtml(c.name)}</option>`).join("")}
-            </select>
-            <div class="text-sm text-muted" style="margin-top:4px;">A empresa selecionada poderá acompanhar esta tarefa no portal.</div>
-          </div>` : (task && task.companyId ? `
+            <label class="form-label">🏢 Empresas vinculadas (opcional) <span class="text-muted" id="tm-company-count">${taskCompanyIds.length ? `— ${taskCompanyIds.length} selecionada(s)` : ""}</span></label>
+            ${companies.length > 6 ? `<input type="text" class="form-control" id="tm-company-search" placeholder="Buscar empresa..." style="margin-bottom:6px;" />` : ""}
+            <div id="tm-company-list" style="max-height:180px;overflow-y:auto;padding:8px 12px;background:var(--bg-surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);">
+              ${companies.map((c) => `
+              <label class="checkbox-row" data-company-name="${UI.escapeHtml(c.name.toLowerCase())}" style="padding:4px 0;cursor:pointer;">
+                <input type="checkbox" class="tm-company-cb" value="${c.id}" ${taskCompanyIds.includes(c.id) ? "checked" : ""} />
+                ${UI.escapeHtml(c.name)}
+              </label>`).join("")}
+            </div>
+            <div class="text-sm text-muted" style="margin-top:4px;">Todas as empresas selecionadas poderão acompanhar esta tarefa no portal.</div>
+          </div>` : (taskCompanyIds.length ? `
           <div class="form-group">
-            <label class="form-label">🏢 Empresa vinculada</label>
-            <div style="padding:9px 14px;background:var(--bg-surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);font-size:14px;">${UI.escapeHtml((companies.find(c => c.id === task.companyId) || {}).name || "—")}</div>
+            <label class="form-label">🏢 Empresas vinculadas</label>
+            <div style="padding:9px 14px;background:var(--bg-surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);font-size:14px;">${UI.escapeHtml(DB.Tasks.companyNamesOf(task).join(", ") || "—")}</div>
           </div>` : "")}
 
           ${canEditFull ? `
@@ -505,6 +510,22 @@
     `;
 
     const overlay = UI.showModal(html, { large: true });
+
+    overlay.querySelectorAll(".tm-company-cb").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const n = overlay.querySelectorAll(".tm-company-cb:checked").length;
+        overlay.querySelector("#tm-company-count").textContent = n ? `— ${n} selecionada(s)` : "";
+      });
+    });
+    const companySearch = overlay.querySelector("#tm-company-search");
+    if (companySearch) {
+      companySearch.addEventListener("input", () => {
+        const q = companySearch.value.trim().toLowerCase();
+        overlay.querySelectorAll("#tm-company-list [data-company-name]").forEach((row) => {
+          row.style.display = row.dataset.companyName.includes(q) ? "" : "none";
+        });
+      });
+    }
 
     overlay.querySelector("#tm-close").addEventListener("click", UI.hideModal);
     overlay.querySelector("#tm-cancel").addEventListener("click", UI.hideModal);
@@ -615,7 +636,9 @@
             tags: overlay.querySelector("#tm-tags").value.split(",").map((s) => s.trim()).filter(Boolean),
             timeLogged: Number(overlay.querySelector("#tm-hours").value) || 0,
             checklist: draftChecklist,
-            companyId: (overlay.querySelector("#tm-company") && overlay.querySelector("#tm-company").value) || null,
+            companyIds: overlay.querySelector("#tm-company-list")
+              ? Array.from(overlay.querySelectorAll(".tm-company-cb:checked")).map((cb) => cb.value)
+              : taskCompanyIds,
             dependsOn: Array.from(overlay.querySelector("#tm-dependson").selectedOptions).map((o) => o.value)
           }
         : {

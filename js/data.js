@@ -594,12 +594,39 @@
   /* CRUD: Tarefas                                                       */
   /* ------------------------------------------------------------------ */
 
+  /* Tarefas antigas (antes da migration 20260930) guardavam um único companyId */
+  function taskCompanyIds(task) {
+    if (!task) return [];
+    if (Array.isArray(task.companyIds)) return task.companyIds;
+    return task.companyId ? [task.companyId] : [];
+  }
+
+  function taskCompanyNames(task) {
+    return taskCompanyIds(task)
+      .map((cid) => (db.companies || []).find((c) => c.id === cid))
+      .filter(Boolean)
+      .map((c) => c.name);
+  }
+
+  function taskAuditCompany(task) {
+    const ids = taskCompanyIds(task);
+    const names = taskCompanyNames(task);
+    return { companyId: ids.length === 1 ? ids[0] : null, companyName: names.length ? names.join(", ") : null };
+  }
+
+  function normalizeTaskCompanies(data) {
+    if (data && Array.isArray(data.companyIds)) delete data.companyId;
+    return data;
+  }
+
   const Tasks = {
+    companyIdsOf: taskCompanyIds,
+    companyNamesOf: taskCompanyNames,
     list(filter) {
       let list = clone(db.tasks);
       if (filter) {
         if (filter.assignee)   list = list.filter((t) => t.assignee === filter.assignee);
-        if (filter.companyId)  list = list.filter((t) => t.companyId === filter.companyId);
+        if (filter.companyId)  list = list.filter((t) => taskCompanyIds(t).includes(filter.companyId));
         if (filter.includeArchived !== true) list = list.filter((t) => !t.archived);
       }
       return list;
@@ -621,13 +648,12 @@
           createdAt: todayISO(),
           updatedAt: todayISO()
         },
-        data
+        normalizeTaskCompanies(data)
       );
       db.tasks.push(task);
       pushRow("tasks", task);
       logActivity(currentUser && currentUser.id, `criou a tarefa "${task.title}"`);
-      const tCo = task.companyId ? (db.companies || []).find((c) => c.id === task.companyId) : null;
-      addAuditLog({ action: "Criação", type: "Tarefa", targetId: task.id, targetName: task.title, companyId: task.companyId || null, companyName: tCo ? tCo.name : null });
+      addAuditLog(Object.assign({ action: "Criação", type: "Tarefa", targetId: task.id, targetName: task.title }, taskAuditCompany(task)));
       return clone(task);
     },
     update(id, patch) {
@@ -641,18 +667,18 @@
       }
 
       Object.assign(task, patch, { updatedAt: todayISO() });
+      normalizeTaskCompanies(task);
       pushRow("tasks", task);
-      const tCo = task.companyId ? (db.companies || []).find((c) => c.id === task.companyId) : null;
-      addAuditLog({ action: "Edição", type: "Tarefa", targetId: id, targetName: task.title, companyId: task.companyId || null, companyName: tCo ? tCo.name : null });
+      addAuditLog(Object.assign({ action: "Edição", type: "Tarefa", targetId: id, targetName: task.title }, taskAuditCompany(task)));
       return clone(task);
     },
     remove(id) {
       const target = db.tasks.find((t) => t.id === id);
       const tName = target ? target.title : id;
-      const tCo = target && target.companyId ? (db.companies || []).find((c) => c.id === target.companyId) : null;
+      const coInfo = taskAuditCompany(target);
       db.tasks = db.tasks.filter((t) => t.id !== id);
       deleteRow("tasks", id);
-      addAuditLog({ action: "Exclusão", type: "Tarefa", targetId: id, targetName: tName, companyId: target ? target.companyId : null, companyName: tCo ? tCo.name : null });
+      addAuditLog(Object.assign({ action: "Exclusão", type: "Tarefa", targetId: id, targetName: tName }, coInfo));
       return true;
     },
     duplicate(id) {
