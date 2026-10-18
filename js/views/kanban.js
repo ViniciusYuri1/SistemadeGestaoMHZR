@@ -148,7 +148,7 @@
           DB.Tasks.update(taskId, { status: newStatus });
           UI.toast(
             newStatus === "concluida"
-              ? "Tarefa concluída e arquivada."
+              ? "Tarefa concluída. Será arquivada automaticamente em 30 dias."
               : "Status atualizado para " + COLUMNS.find((c) => c.status === newStatus).label,
             "success"
           );

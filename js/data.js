@@ -28,6 +28,8 @@
     );
   }
 
+  const ARCHIVE_AFTER_DAYS = 30;
+
   function todayISO(offsetDays) {
     const d = new Date();
     d.setDate(d.getDate() + (offsetDays || 0));
@@ -206,6 +208,7 @@
         return null;
       }
       await fetchAll();
+      Tasks.archiveOldCompleted();
       return clone(currentUser);
     } catch (e) {
       console.error("[DB.init]", e);
@@ -662,10 +665,14 @@
       const task = db.tasks.find((t) => t.id === id);
       if (!task) return null;
 
-      /* Concluir arquiva automaticamente; reabrir uma tarefa concluída desarquiva */
-      if (patch.status && patch.status !== task.status && patch.archived === undefined) {
-        if (patch.status === "concluida") patch.archived = true;
-        else if (task.status === "concluida" && task.archived) patch.archived = false;
+      /* Concluir marca a data (arquivamento ocorre após ARCHIVE_AFTER_DAYS);
+         reabrir uma tarefa concluída limpa a data e desarquiva */
+      if (patch.status && patch.status !== task.status) {
+        if (patch.status === "concluida") patch.completedAt = todayISO();
+        else if (task.status === "concluida") {
+          patch.completedAt = null;
+          if (task.archived && patch.archived === undefined) patch.archived = false;
+        }
       }
 
       Object.assign(task, patch, { updatedAt: todayISO() });
@@ -691,6 +698,8 @@
       copy.id = uid("task");
       copy.title = original.title + " (cópia)";
       copy.status = "nao_iniciada";
+      copy.archived = false;
+      copy.completedAt = null;
       copy.handoffs = [];
       copy.participants = uniq([currentUser && currentUser.id, copy.assignee]);
       copy.createdAt = todayISO();
@@ -715,6 +724,23 @@
       pushRow("tasks", task);
       return clone(task);
     },
+    /* Arquiva concluídas há mais de ARCHIVE_AFTER_DAYS. Tarefas concluídas antes
+       de existir completedAt usam updatedAt como referência. */
+    archiveOldCompleted() {
+      if (!currentUser || currentUser.role === "company") return 0;
+      const limit = todayISO(-ARCHIVE_AFTER_DAYS);
+      const old = db.tasks.filter((t) =>
+        t.status === "concluida" && !t.archived && (t.completedAt || t.updatedAt || t.createdAt || "") <= limit
+      );
+      old.forEach((t) => {
+        t.archived = true;
+        pushRow("tasks", t);
+      });
+      if (old.length) {
+        addAuditLog({ action: "Edição", type: "Tarefa", targetId: "auto-archive", targetName: `${old.length} tarefa(s)`, details: `Arquivadas automaticamente (concluídas há mais de ${ARCHIVE_AFTER_DAYS} dias)` });
+      }
+      return old.length;
+    },
     isOverdue(task) {
       if (task.status === "concluida") return false;
       return task.dueDate < todayISO();
@@ -737,6 +763,7 @@
         assignee: toUserId,
         status: "nao_iniciada",
         archived: false,
+        completedAt: null,
         updatedAt: todayISO()
       });
       task.participants = uniq((task.participants || []).concat([currentUser && currentUser.id, fromUserId, toUserId]));

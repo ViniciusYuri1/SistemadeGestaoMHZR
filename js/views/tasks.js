@@ -245,7 +245,7 @@
       sel.addEventListener("change", (e) => {
         const newStatus = e.target.value;
         DB.Tasks.update(sel.dataset.statusId, { status: newStatus });
-        UI.toast(newStatus === "concluida" ? "Tarefa concluída e arquivada." : "Status atualizado.", "success");
+        UI.toast(newStatus === "concluida" ? "Tarefa concluída. Será arquivada automaticamente em 30 dias." : "Status atualizado.", "success");
         reRender();
       });
     });
