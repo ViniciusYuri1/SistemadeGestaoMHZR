@@ -18,6 +18,7 @@
   --color-danger-light: #fee2e2;
   --color-info: #2563eb;
   --color-info-light: #dbeafe;
+  --chart-bar: #7c3aed;
 
   --bg-app: #f5f3ff;
   --bg-surface: #ffffff;
@@ -59,6 +60,7 @@
   --color-primary: #a78bfa;
   --color-primary-dark: #8b5cf6;
   --color-primary-light: #2d1f5e;
+  --chart-bar: #8b5cf6;
   --color-accent-soft: #4c3a8a;
   --color-success-light: #0f2a1a;
   --color-warning-light: #2a1f08;

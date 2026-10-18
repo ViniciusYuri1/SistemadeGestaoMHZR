@@ -33,42 +33,113 @@
     return `${MONTH_NAMES[parseInt(m, 10) - 1]}/${y}`;
   }
 
-  function monthOptions(selected) {
-    const opts = [];
-    const now = new Date();
-    for (let i = -5; i <= 4; i++) {
-      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      opts.push(`<option value="${ym}" ${ym === selected ? "selected" : ""}>${monthLabel(ym)}</option>`);
-    }
-    return opts.join("");
+  function shortMonthLabel(ym) {
+    const [y, m] = ym.split("-");
+    return `${MONTH_NAMES[parseInt(m, 10) - 1]}/${y.slice(2)}`;
+  }
+
+  function ymAdd(ym, n) {
+    const [y, m] = ym.split("-").map(Number);
+    const d = new Date(y, m - 1 + n, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  function monthsBetween(from, to) {
+    const out = [];
+    for (let ym = from; ym <= to && out.length < 240; ym = ymAdd(ym, 1)) out.push(ym);
+    return out;
   }
 
   /* ---- estado de filtros (persiste entre trocas de aba) ---- */
+  /* periodFrom/periodTo: "YYYY-MM" ou "" (sem limite); compartilhado por Boletos e Custos */
   let state = {
     tab: "boletos",
-    filterMonth: currentYM(), filterCompany: "", filterStatus: "",
-    costFilterMonth: currentYM(), costFilterType: ""
+    periodFrom: currentYM(), periodTo: currentYM(),
+    filterCompany: "", filterStatus: "",
+    costFilterType: ""
   };
+
+  /* ================================================================= */
+  /* FILTRO DE PERÍODO                                                  */
+  /* ================================================================= */
+
+  function periodPresets() {
+    const cur = currentYM();
+    const y = cur.slice(0, 4);
+    return [
+      ["mes",         "Este mês",         cur,           cur],
+      ["mes_passado", "Mês passado",      ymAdd(cur, -1), ymAdd(cur, -1)],
+      ["3m",          "Últimos 3 meses",  ymAdd(cur, -2), cur],
+      ["6m",          "Últimos 6 meses",  ymAdd(cur, -5), cur],
+      ["12m",         "Últimos 12 meses", ymAdd(cur, -11), cur],
+      ["ano",         `Ano de ${y}`,      `${y}-01`,     `${y}-12`],
+      ["ano_passado", `Ano de ${y - 1}`,  `${y - 1}-01`, `${y - 1}-12`],
+      ["tudo",        "Todo o período",   "",            ""]
+    ];
+  }
+
+  function inPeriod(ym) {
+    return !!ym && (!state.periodFrom || ym >= state.periodFrom) && (!state.periodTo || ym <= state.periodTo);
+  }
+
+  function periodLabel() {
+    const { periodFrom: f, periodTo: t } = state;
+    if (!f && !t) return "todo o período";
+    if (f && t) return f === t ? monthLabel(f) : `${monthLabel(f)} – ${monthLabel(t)}`;
+    return f ? `a partir de ${monthLabel(f)}` : `até ${monthLabel(t)}`;
+  }
+
+  function periodFilterHtml() {
+    const presets = periodPresets();
+    const match = presets.find((p) => p[2] === state.periodFrom && p[3] === state.periodTo);
+    return `
+      <select class="form-control" id="f-period-preset" style="width:auto;min-width:160px;" title="Período">
+        ${presets.map((p) => `<option value="${p[0]}" ${match && match[0] === p[0] ? "selected" : ""}>${p[1]}</option>`).join("")}
+        <option value="custom" ${match ? "" : "selected"}>Personalizado</option>
+      </select>
+      <label class="period-field">De
+        <input type="month" class="form-control" id="f-period-from" value="${state.periodFrom}" />
+      </label>
+      <label class="period-field">Até
+        <input type="month" class="form-control" id="f-period-to" value="${state.periodTo}" />
+      </label>`;
+  }
+
+  function bindPeriodFilter(wrap, rerender) {
+    wrap.querySelector("#f-period-preset").addEventListener("change", (e) => {
+      const p = periodPresets().find((x) => x[0] === e.target.value);
+      if (!p) return;
+      state.periodFrom = p[2];
+      state.periodTo = p[3];
+      rerender();
+    });
+    const onRange = () => {
+      let f = wrap.querySelector("#f-period-from").value;
+      let t = wrap.querySelector("#f-period-to").value;
+      if (f && t && f > t) [f, t] = [t, f];
+      state.periodFrom = f;
+      state.periodTo = t;
+      rerender();
+    };
+    wrap.querySelector("#f-period-from").addEventListener("change", onRange);
+    wrap.querySelector("#f-period-to").addEventListener("change", onRange);
+  }
 
   /* ================================================================= */
   /* BOLETOS TAB                                                        */
   /* ================================================================= */
 
-  function renderStatCards(boletos, filterMonth) {
+  function renderStatCards(boletos) {
     const recebido  = boletos.filter((b) => b.status === "pago").reduce((s, b) => s + b.amount, 0);
     const pendentes = boletos.filter((b) => b.status === "pendente");
     const vencidos  = boletos.filter((b) => b.status === "vencido");
-    /* Recebido no mês: usa o filtro de mês ativo, ou o mês atual se não houver filtro */
-    const mes       = filterMonth || currentYM();
-    const boletosDoMes = filterMonth ? boletos : DB.Boletos.list({ month: mes });
-    const recMes    = boletosDoMes.filter((b) => b.status === "pago").reduce((s, b) => s + b.amount, 0);
+    const faturado  = boletos.filter((b) => b.status !== "cancelado").reduce((s, b) => s + b.amount, 0);
 
     const cards = [
-      { icon: "💵", bg: "var(--color-success-light)",  color: "var(--color-success)",  value: brl(recebido),                                         label: "Total Recebido"                                    },
+      { icon: "💵", bg: "var(--color-success-light)",  color: "var(--color-success)",  value: brl(recebido),                                         label: "Recebido"                                          },
       { icon: "📋", bg: "var(--color-warning-light)",  color: "var(--color-warning)",  value: brl(pendentes.reduce((s,b)=>s+b.amount,0)),             label: `A Receber (${pendentes.length} boleto${pendentes.length !== 1 ? "s" : ""})` },
       { icon: "⚠️", bg: "var(--color-danger-light)",   color: "var(--color-danger)",   value: brl(vencidos.reduce((s,b)=>s+b.amount,0)),              label: `Vencidos (${vencidos.length} boleto${vencidos.length !== 1 ? "s" : ""})` },
-      { icon: "📅", bg: "var(--color-primary-light)",  color: "var(--color-primary)",  value: brl(recMes),                                            label: `Recebido em ${monthLabel(mes)}`                    }
+      { icon: "📅", bg: "var(--color-primary-light)",  color: "var(--color-primary)",  value: brl(faturado),                                          label: `Faturado em ${periodLabel()}`                      }
     ];
 
     return `<div class="stat-grid">${cards.map((c) => `
@@ -84,7 +155,7 @@
     const companies = DB.Companies.list();
 
     let filtered = all;
-    if (state.filterMonth)   filtered = filtered.filter((b) => b.month === state.filterMonth);
+    if (state.periodFrom || state.periodTo) filtered = filtered.filter((b) => inPeriod(b.month));
     if (state.filterCompany) filtered = filtered.filter((b) => b.companyId === state.filterCompany);
     if (state.filterStatus)  filtered = filtered.filter((b) => b.status === state.filterStatus);
 
@@ -124,15 +195,12 @@
     ).join("");
 
     wrap.innerHTML = `
-      ${renderStatCards(filtered, state.filterMonth)}
+      ${renderStatCards(filtered)}
       <div class="card">
         <div class="card-header" style="flex-wrap:wrap;gap:10px;">
           <h3 class="card-title">Boletos</h3>
           <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-            <select class="form-control" id="f-month" style="width:auto;min-width:150px;">
-              <option value="">Todos os meses</option>
-              ${monthOptions(state.filterMonth)}
-            </select>
+            ${periodFilterHtml()}
             <select class="form-control" id="f-company" style="width:auto;min-width:180px;">
               <option value="">Todas as empresas</option>
               ${companyOpts}
@@ -152,7 +220,7 @@
         </div>
       </div>`;
 
-    wrap.querySelector("#f-month").addEventListener("change", (e) => { state.filterMonth = e.target.value; renderBoletosTab(wrap); });
+    bindPeriodFilter(wrap, () => renderBoletosTab(wrap));
     wrap.querySelector("#f-company").addEventListener("change", (e) => { state.filterCompany = e.target.value; renderBoletosTab(wrap); });
     wrap.querySelector("#f-status").addEventListener("change", (e) => { state.filterStatus = e.target.value; renderBoletosTab(wrap); });
     wrap.querySelector("#btn-new-boleto").addEventListener("click", () => openBoletoModal(null, () => renderBoletosTab(wrap)));
@@ -200,20 +268,116 @@
       </div>`;
   }
 
-  function renderCustosSummaryCards() {
-    const totalCustos = DB.Costs.totalAll();
-    const totalRecebido = DB.Boletos.list().filter((b) => b.status === "pago").reduce((s, b) => s + b.amount, 0);
-    const lucroLiquido  = totalRecebido - totalCustos;
-    const mes = state.costFilterMonth || currentYM();
-    const custosDoMes = DB.Costs.totalForMonth(mes);
+  /* Meses do período selecionado; limites em aberto usam o primeiro/último mês com dados */
+  function periodMonths(costs) {
+    let from = state.periodFrom;
+    let to = state.periodTo;
+    if (!from || !to) {
+      const months = [];
+      costs.forEach((c) => months.push(...DB.Costs.monthsOf(c)));
+      DB.Boletos.list().forEach((b) => b.month && months.push(b.month));
+      if (!months.length) return [];
+      months.sort();
+      from = from || months[0];
+      to = to || months[months.length - 1];
+    }
+    return from <= to ? monthsBetween(from, to) : [];
+  }
+
+  function costInMonth(c, ym) {
+    return DB.Costs.monthsOf(c).includes(ym) ? c.amount || 0 : 0;
+  }
+
+  function renderCustosSummaryCards(allCosts, months) {
+    const custos = months.reduce((s, ym) => s + allCosts.reduce((t, c) => t + costInMonth(c, ym), 0), 0);
+    const recebido = DB.Boletos.list().filter((b) => b.status === "pago" && inPeriod(b.month)).reduce((s, b) => s + b.amount, 0);
+    const lucro = recebido - custos;
+    const media = months.length ? custos / months.length : 0;
+    const label = periodLabel();
 
     return `<div class="stat-grid">${[
-      { icon: "💵", bg: "var(--color-success-light)", color: "var(--color-success)", value: brl(totalRecebido), label: "Total Recebido" },
-      { icon: "💸", bg: "var(--color-danger-light)",  color: "var(--color-danger)",  value: brl(totalCustos),   label: "Total de Custos" },
-      { icon: lucroLiquido >= 0 ? "📈" : "📉", bg: "var(--color-primary-light)", color: "var(--color-primary)",
-        value: brl(lucroLiquido), valueColor: lucroLiquido >= 0 ? "var(--color-success)" : "var(--color-danger)", label: "Lucro Líquido" },
-      { icon: "📅", bg: "var(--color-warning-light)", color: "var(--color-warning)", value: brl(custosDoMes), label: `Custos em ${monthLabel(mes)}` }
+      { icon: "💵", bg: "var(--color-success-light)", color: "var(--color-success)", value: brl(recebido), label: `Recebido em ${label}` },
+      { icon: "💸", bg: "var(--color-danger-light)",  color: "var(--color-danger)",  value: brl(custos),   label: `Custos em ${label}` },
+      { icon: lucro >= 0 ? "📈" : "📉", bg: "var(--color-primary-light)", color: "var(--color-primary)",
+        value: brl(lucro), valueColor: lucro >= 0 ? "var(--color-success)" : "var(--color-danger)", label: "Lucro líquido no período" },
+      { icon: "📅", bg: "var(--color-warning-light)", color: "var(--color-warning)", value: brl(media), label: `Custo médio mensal (${months.length} ${months.length === 1 ? "mês" : "meses"})` }
     ].map(statCardHtml).join("")}</div>`;
+  }
+
+  /* ---- Gráficos de custos ---- */
+
+  function compactBRL(v) {
+    if (v >= 1e6) return `R$ ${(v / 1e6).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mi`;
+    if (v >= 1e3) return `R$ ${(v / 1e3).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mil`;
+    return `R$ ${Math.round(v).toLocaleString("pt-BR")}`;
+  }
+
+  function niceStep(max, ticks) {
+    const raw = max / ticks;
+    const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+    return [1, 2, 2.5, 5, 10].map((m) => m * pow).find((s) => s >= raw);
+  }
+
+  function monthlyChartHtml(series) {
+    const max = Math.max(...series.map((d) => d.value));
+    if (!series.length || max <= 0) {
+      return `<div class="text-sm text-muted" style="padding:32px;text-align:center;">Nenhum custo no período selecionado.</div>`;
+    }
+    const step = niceStep(max, 4);
+    const top = step * 4;
+    const peakIdx = series.findIndex((d) => d.value === max);
+    const labelEvery = Math.ceil(series.length / 6);
+    const grid = [0, 1, 2, 3, 4].map((i) => `
+      <div class="cc-grid" style="bottom:${(i / 4) * 100}%;"><span>${compactBRL(step * i)}</span></div>`).join("");
+    const cols = series.map((d, i) => `
+      <div class="cc-col" tabindex="0" data-tip="${monthLabel(d.ym)}: ${brl(d.value)}" aria-label="${monthLabel(d.ym)}: ${brl(d.value)}">
+        ${i === peakIdx ? `<div class="cc-peak" style="bottom:${(d.value / top) * 100}%;">${compactBRL(d.value)}</div>` : ""}
+        <div class="cc-bar" style="height:${(d.value / top) * 100}%;"></div>
+      </div>`).join("");
+    const xLabels = series.map((d, i) => `<div class="cc-x">${i % labelEvery === 0 ? shortMonthLabel(d.ym) : ""}</div>`).join("");
+    const tableRows = series.map((d) => `<tr><td>${monthLabel(d.ym)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${brl(d.value)}</td></tr>`).join("");
+
+    return `
+      <div class="cost-chart">
+        <div class="cc-plot">${grid}<div class="cc-cols">${cols}</div><div class="cc-tip" hidden></div></div>
+        <div class="cc-xaxis">${xLabels}</div>
+      </div>
+      <details style="margin-top:10px;">
+        <summary class="text-sm text-muted" style="cursor:pointer;">Ver dados em tabela</summary>
+        <table class="data-table" style="margin-top:8px;"><thead><tr><th>Mês</th><th style="text-align:right;">Custo</th></tr></thead><tbody>${tableRows}</tbody></table>
+      </details>`;
+  }
+
+  function byTypeChartHtml(rows) {
+    const max = rows.length ? rows[0].value : 0;
+    if (max <= 0) return `<div class="text-sm text-muted" style="padding:32px;text-align:center;">Nenhum custo no período selecionado.</div>`;
+    const total = rows.reduce((s, r) => s + r.value, 0);
+    return `<div class="ct-list">${rows.map((r) => `
+      <div class="ct-row" title="${UI.escapeHtml(r.type)}: ${brl(r.value)} (${Math.round((r.value / total) * 100)}%)">
+        <div class="ct-label">${UI.escapeHtml(r.type)}</div>
+        <div class="ct-track"><div class="ct-bar" style="width:${(r.value / max) * 100}%;"></div></div>
+        <div class="ct-value">${brl(r.value)} <span class="text-muted">· ${Math.round((r.value / total) * 100)}%</span></div>
+      </div>`).join("")}</div>`;
+  }
+
+  function bindChartTooltips(wrap) {
+    wrap.querySelectorAll(".cc-plot").forEach((plot) => {
+      const tip = plot.querySelector(".cc-tip");
+      const show = (col) => {
+        tip.textContent = col.dataset.tip;
+        tip.hidden = false;
+        const pr = plot.getBoundingClientRect();
+        const cr = col.getBoundingClientRect();
+        const x = cr.left - pr.left + cr.width / 2;
+        tip.style.left = `${Math.min(Math.max(x, tip.offsetWidth / 2), pr.width - tip.offsetWidth / 2)}px`;
+      };
+      plot.querySelectorAll(".cc-col").forEach((col) => {
+        col.addEventListener("mouseenter", () => show(col));
+        col.addEventListener("focus", () => show(col));
+        col.addEventListener("mouseleave", () => { tip.hidden = true; });
+        col.addEventListener("blur", () => { tip.hidden = true; });
+      });
+    });
   }
 
   function renderProjectionCards() {
@@ -245,11 +409,21 @@
     const all = DB.Costs.list();
     const knownTypes = Array.from(new Set([...COST_TYPES, ...all.map((c) => c.type)])).filter(Boolean);
 
+    const months = periodMonths(all);
+
     let filtered = all;
-    if (state.costFilterMonth) filtered = filtered.filter((c) => DB.Costs.monthsOf(c).includes(state.costFilterMonth));
+    if (state.periodFrom || state.periodTo) filtered = filtered.filter((c) => DB.Costs.monthsOf(c).some(inPeriod));
     if (state.costFilterType)  filtered = filtered.filter((c) => c.type === state.costFilterType);
 
-    const periodLabel = (c) => c.endMonth && c.endMonth !== c.month
+    const monthlySeries = months.map((ym) => ({ ym, value: filtered.reduce((s, c) => s + costInMonth(c, ym), 0) }));
+    const typeTotals = {};
+    all.forEach((c) => {
+      const v = months.reduce((s, ym) => s + costInMonth(c, ym), 0);
+      if (v > 0) typeTotals[c.type || "Outros"] = (typeTotals[c.type || "Outros"] || 0) + v;
+    });
+    const byType = Object.entries(typeTotals).map(([type, value]) => ({ type, value })).sort((a, b) => b.value - a.value);
+
+    const costPeriodLabel = (c) => c.endMonth && c.endMonth !== c.month
       ? `${monthLabel(c.month)} – ${monthLabel(c.endMonth)}`
       : monthLabel(c.month);
 
@@ -258,7 +432,7 @@
       : filtered.map((c) => `<tr>
           <td><span class="badge badge-em_andamento">${UI.escapeHtml(c.type)}</span></td>
           <td class="text-sm">${UI.escapeHtml(c.description)}</td>
-          <td class="text-sm">${periodLabel(c)}</td>
+          <td class="text-sm">${costPeriodLabel(c)}</td>
           <td style="font-weight:700;color:var(--color-danger);">${brl(c.amount)}${c.endMonth && c.endMonth !== c.month ? `<div class="text-sm text-muted" style="font-weight:400;">/mês</div>` : ""}</td>
           <td>
             <div class="flex gap-2">
@@ -273,20 +447,32 @@
     ).join("");
 
     wrap.innerHTML = `
-      ${renderCustosSummaryCards()}
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-pad" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+          <strong class="text-sm" style="margin-right:4px;">Período</strong>
+          ${periodFilterHtml()}
+          <select class="form-control" id="f-cost-type" style="width:auto;min-width:180px;">
+            <option value="">Todos os tipos</option>
+            ${typeOpts}
+          </select>
+        </div>
+      </div>
+      ${renderCustosSummaryCards(all, months)}
+      <div class="cost-charts">
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Custos por mês${state.costFilterType ? ` — ${UI.escapeHtml(state.costFilterType)}` : ""}</h3></div>
+          <div class="card-pad">${monthlyChartHtml(monthlySeries)}</div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Custos por tipo em ${periodLabel()}</h3></div>
+          <div class="card-pad">${byTypeChartHtml(byType)}</div>
+        </div>
+      </div>
       ${renderProjectionCards()}
       <div class="card">
         <div class="card-header" style="flex-wrap:wrap;gap:10px;">
-          <h3 class="card-title">Custos</h3>
+          <h3 class="card-title">Custos lançados (${filtered.length})</h3>
           <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-            <select class="form-control" id="f-cost-month" style="width:auto;min-width:150px;">
-              <option value="">Todos os meses</option>
-              ${monthOptions(state.costFilterMonth)}
-            </select>
-            <select class="form-control" id="f-cost-type" style="width:auto;min-width:180px;">
-              <option value="">Todos os tipos</option>
-              ${typeOpts}
-            </select>
             <button class="btn btn-primary btn-sm" id="btn-new-cost">+ Novo Custo</button>
           </div>
         </div>
@@ -298,7 +484,8 @@
         </div>
       </div>`;
 
-    wrap.querySelector("#f-cost-month").addEventListener("change", (e) => { state.costFilterMonth = e.target.value; renderCustosTab(wrap); });
+    bindPeriodFilter(wrap, () => renderCustosTab(wrap));
+    bindChartTooltips(wrap);
     wrap.querySelector("#f-cost-type").addEventListener("change", (e) => { state.costFilterType = e.target.value; renderCustosTab(wrap); });
     wrap.querySelector("#btn-new-cost").addEventListener("click", () => openCostModal(null, () => renderCustosTab(wrap)));
 

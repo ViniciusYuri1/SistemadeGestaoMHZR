@@ -441,6 +441,40 @@
 .kanban-card .kc-meta { display: flex; align-items: center; justify-content: space-between; }
 .kanban-card .kc-tags { display: flex; gap: 4px; flex-wrap: wrap; }
 
+/* Financeiro: gráficos de custos */
+.cost-charts { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; margin-top: 16px; }
+.cost-charts .card { min-width: 0; }
+.cost-chart { --cc-gutter: 64px; }
+.cc-plot { position: relative; height: 220px; margin-left: var(--cc-gutter); margin-top: 18px; }
+.cc-grid { position: absolute; left: 0; right: 0; border-top: 1px solid var(--border-color); }
+.cc-grid span { position: absolute; right: calc(100% + 8px); top: -8px; font-size: 11px; color: var(--text-secondary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cc-cols { position: absolute; inset: 0; display: flex; align-items: flex-end; }
+.cc-col { position: relative; flex: 1; height: 100%; display: flex; align-items: flex-end; justify-content: center; cursor: default; outline: none; border-radius: 4px; }
+.cc-col:hover, .cc-col:focus-visible { background: var(--bg-surface-alt); }
+.cc-bar { width: 60%; max-width: 24px; min-height: 2px; background: var(--chart-bar); border-radius: 4px 4px 0 0; }
+.cc-peak { position: absolute; left: 50%; transform: translate(-50%, -4px); font-size: 11px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+.cc-xaxis { display: flex; margin-left: var(--cc-gutter); margin-top: 6px; }
+.cc-x { flex: 1; text-align: center; font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: visible; }
+.cc-tip { position: absolute; top: -14px; transform: translate(-50%, -100%); background: var(--text-primary); color: var(--bg-surface); font-size: 12px; font-weight: 600; padding: 6px 10px; border-radius: var(--radius-sm); white-space: nowrap; pointer-events: none; box-shadow: var(--shadow-md); z-index: 2; }
+.ct-list { display: flex; flex-direction: column; gap: 12px; }
+.ct-row { display: grid; grid-template-columns: minmax(90px, 140px) 1fr; grid-template-areas: "label value" "track track"; gap: 4px 10px; align-items: center; }
+.ct-label { grid-area: label; font-size: 13px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-value { grid-area: value; font-size: 12.5px; color: var(--text-primary); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ct-track { grid-area: track; height: 10px; }
+.ct-bar { height: 100%; min-width: 2px; background: var(--chart-bar); border-radius: 0 4px 4px 0; }
+
+.period-field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+.period-field .form-control { width: auto; min-width: 0; }
+
+@media (max-width: 900px) {
+  .cost-charts { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .period-field, #f-period-preset, #f-cost-type, #f-company, #f-status { flex: 1 1 100%; }
+  .period-field .form-control { flex: 1; }
+  .stat-card .stat-value { overflow-wrap: anywhere; }
+}
+
 /* -------------------------------------------------------------------- */
 /* Auditoria                                                            */
 /* -------------------------------------------------------------------- */
@@ -659,7 +693,7 @@
 
   /* Stat cards: 2 colunas */
   .stat-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
     margin-bottom: 16px;
   }
