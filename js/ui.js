@@ -50,12 +50,35 @@
       .replace(/"/g, "&quot;");
   }
 
+  /* Fotos são data URLs de vários MB; repetidas em cada cartão/linha, estouram o
+     tamanho máximo de string do navegador. Vira um blob: URL curto, criado uma vez. */
+  const photoUrlCache = new Map();
+  function photoSrc(photo) {
+    if (photo.slice(0, 5) !== "data:") return photo;
+    const key = photo.length + ":" + photo.slice(0, 64) + photo.slice(-64);
+    let url = photoUrlCache.get(key);
+    if (url) return url;
+    try {
+      const comma = photo.indexOf(",");
+      const mime = (photo.slice(5, comma).split(";")[0]) || "image/png";
+      const bin = atob(photo.slice(comma + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    } catch (e) {
+      return "";
+    }
+    photoUrlCache.set(key, url);
+    return url;
+  }
+
   /* Renderiza um avatar: foto (se o usuário tiver `photo`) ou iniciais. */
   function avatarHtml(user, sizeClass, extraAttrs) {
     const cls = "avatar" + (sizeClass ? " " + sizeClass : "");
     const attrs = extraAttrs || "";
-    if (user && user.photo) {
-      return `<div class="${cls}" ${attrs}><img src="${user.photo}" alt="${escapeHtml(user.name || "")}" /></div>`;
+    const src = user && user.photo ? photoSrc(user.photo) : "";
+    if (src) {
+      return `<div class="${cls}" ${attrs}><img src="${src}" alt="${escapeHtml(user.name || "")}" /></div>`;
     }
     return `<div class="${cls}" ${attrs}>${escapeHtml(user ? (user.avatar || "?") : "?")}</div>`;
   }
