@@ -83,11 +83,37 @@
     return global.SB;
   }
 
+  /* Se a renovação do token falha (aba duplicada, PC hibernado, rede), o
+     supabase-js descarta a sessão em silêncio e as gravações seguintes vão
+     como anônimas — o cache local mostraria a alteração como salva. */
+  let sessionLost = false;
+  function handleSessionLost() {
+    if (sessionLost) return;
+    sessionLost = true;
+    currentUser = null;
+    if (global.UI && global.UI.toast) {
+      global.UI.toast("Sua sessão expirou e a última alteração não foi salva. Entre novamente para continuar.", "error");
+    }
+    setTimeout(() => { global.location.href = "index.html"; }, 3500);
+  }
+
+  function isRlsError(error) {
+    const msg = (error && error.message) || "";
+    return (error && error.code === "42501") || msg.indexOf("row-level security") !== -1 || msg.indexOf("JWT") !== -1;
+  }
+
   function syncError(where, error) {
     console.error("[DB sync] " + where, error);
-    if (global.UI && global.UI.toast) {
-      global.UI.toast("Falha ao salvar no servidor: " + (error && error.message ? error.message : where), "error");
-    }
+    if (sessionLost) return;
+    const show = () => {
+      if (global.UI && global.UI.toast) {
+        global.UI.toast("Falha ao salvar no servidor: " + (error && error.message ? error.message : where), "error");
+      }
+    };
+    if (!isRlsError(error) || !global.SB) return show();
+    sb().auth.getSession()
+      .then(({ data }) => { if (data && data.session) show(); else handleSessionLost(); })
+      .catch(() => handleSessionLost());
   }
 
   /* Envia (upsert) um objeto para uma tabela-documento, em segundo plano */
@@ -208,6 +234,9 @@
         return null;
       }
       await fetchAll();
+      sb().auth.onAuthStateChange((event) => {
+        if (event === "SIGNED_OUT" && currentUser) handleSessionLost();
+      });
       Tasks.archiveOldCompleted();
       return clone(currentUser);
     } catch (e) {
