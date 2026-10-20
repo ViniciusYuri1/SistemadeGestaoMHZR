@@ -123,8 +123,8 @@
       </div>`;
   }
 
-  function weeklyChartHtml() {
-    const data = DB.Stats.weeklyCompletion();
+  function weeklyChartHtml(ctx) {
+    const data = DB.Stats.weeklyCompletion(DB.canSeeAllTasks(ctx.user) ? undefined : ctx.user.id);
     const max = Math.max(1, ...data.map((d) => d.count));
     const weekdays = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
     return `
@@ -170,14 +170,14 @@
       .join("");
   }
 
-  function miniCalendarHtml() {
+  function miniCalendarHtml(ctx) {
     const now = new Date();
     const year = now.getFullYear();
     const month = now.getMonth();
     const firstDay = new Date(year, month, 1).getDay();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
     const todayStr = DB.todayISO();
-    const tasksWithDue = DB.Tasks.list().map((t) => t.dueDate);
+    const tasksWithDue = DB.Tasks.list({ assignee: DB.canSeeAllTasks(ctx.user) ? undefined : ctx.user.id }).map((t) => t.dueDate);
 
     let cells = "";
     for (let i = 0; i < firstDay; i++) cells += `<td class="empty"></td>`;
@@ -230,10 +230,10 @@
       <div class="dashboard-grid">
         <div class="flex-col gap-4">
           ${statusBarChartHtml(ctx)}
-          ${weeklyChartHtml()}
+          ${weeklyChartHtml(ctx)}
         </div>
         <div class="flex-col gap-4">
-          ${miniCalendarHtml()}
+          ${miniCalendarHtml(ctx)}
           ${priorityDonutHtml(ctx)}
         </div>
       </div>

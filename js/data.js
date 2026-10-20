@@ -930,11 +930,12 @@
         };
       });
     },
-    weeklyCompletion() {
+    weeklyCompletion(assignee) {
+      const tasks = assignee ? db.tasks.filter((t) => t.assignee === assignee) : db.tasks;
       const days = [];
       for (let i = 6; i >= 0; i--) {
         const date = todayISO(-i);
-        const count = db.tasks.filter((t) => t.status === "concluida" && t.updatedAt === date).length;
+        const count = tasks.filter((t) => t.status === "concluida" && t.updatedAt === date).length;
         days.push({ date, count });
       }
       return days;
