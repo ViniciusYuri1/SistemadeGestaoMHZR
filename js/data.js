@@ -846,7 +846,11 @@
     };
     db.auditLog.unshift(entry);
     db.auditLog = db.auditLog.slice(0, 1000);
-    pushRow("audit_log", entry);
+    /* insert, não upsert: ON CONFLICT exige poder ler a linha, e só admin lê audit_log */
+    sb()
+      .from("audit_log")
+      .insert({ id: entry.id, data: entry })
+      .then(({ error }) => { if (error) syncError("audit_log/" + entry.id, error); });
   }
 
   const Activities = {
