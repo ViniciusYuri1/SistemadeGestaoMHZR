@@ -1237,6 +1237,26 @@
       overlay.querySelector("#ac-close").addEventListener("click", close);
       overlay.querySelector("#ac-done").addEventListener("click", close);
 
+      /* Quem entra pelo Telegram (login sem senha) */
+      DB.Telegram.accounts().then((accounts) => {
+        accounts.forEach((acc) => {
+          const row = overlay.querySelector(`[data-person="${acc.user_id}"]`);
+          if (!row || !row.isConnected) return;
+          const info = document.createElement("div");
+          info.className = "flex items-center gap-2 text-sm";
+          info.style.marginTop = "6px";
+          info.innerHTML = `<span>📱 Entra pelo Telegram${acc.tg_username ? ` (@${UI.escapeHtml(acc.tg_username)})` : ""}</span>
+            <button type="button" class="btn btn-ghost btn-sm" style="padding:2px 8px;">Desconectar</button>`;
+          info.querySelector("button").addEventListener("click", async () => {
+            if (!UI.confirmDialog("Desconectar o Telegram desta pessoa? Ela passa a entrar só com e-mail e senha até conectar de novo.")) return;
+            const r = await DB.Telegram.adminDisconnect(acc.user_id);
+            UI.toast(r.ok ? "Telegram desconectado." : r.message, r.ok ? "success" : "error");
+            if (r.ok) info.remove();
+          });
+          row.appendChild(info);
+        });
+      });
+
       const readPerms = (root, prefix) => PERMS.reduce((o, p) => {
         o[p.key] = root.querySelector(`[data-${prefix}-perm="${p.key}"]`).checked;
         return o;

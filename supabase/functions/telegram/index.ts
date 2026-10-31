@@ -6,6 +6,8 @@
 //   POST ?action=dispatch                  → envia a fila notification_outbox
 //        (chamado pelo banco via pg_net e pelo pg_cron; só envia o que já está
 //        na fila, por isso não precisa de senha)
+//   POST ?action=miniapp-login {initData}  → sessão do portal para a conta do
+//        Telegram conectada (assinatura conferida com o token do bot)
 //   POST ?action=setup   (admin logado)    → registra o webhook e os comandos
 //   POST ?action=status  (admin logado)    → dados do bot e do webhook
 //
@@ -114,6 +116,10 @@ async function handleUpdate(update: Any) {
   const chat = msg.chat;
   const isGroup = chat.type === "group" || chat.type === "supergroup";
 
+  if (cmd === "start" && !isGroup) {
+    await handlePrivateStart(msg, arg);
+    return;
+  }
   if (cmd === "start" || cmd === "ajuda" || cmd === "help") {
     await reply(chat.id, isGroup ? HELP : HELP + "\n\n<i>Adicione o bot ao grupo do cliente para usar.</i>");
     return;
@@ -158,6 +164,92 @@ async function handleUpdate(update: Any) {
     await db.rpc("telegram_chat_left", { p_chat_id: chat.id });
     await reply(chat.id, "🔕 Grupo desvinculado. Nenhum aviso será enviado aqui.");
   }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Conversa privada: conectar a conta e abrir o portal (Mini App)            */
+/* ------------------------------------------------------------------------- */
+
+async function appUrl(): Promise<string | null> {
+  const { data } = await db.rpc("telegram_setting", { p_key: "app_url" });
+  return data ?? null;
+}
+
+function portalKeyboard(app: string | null, label = "📱 Abrir portal") {
+  if (!app || !/^https:\/\//.test(app)) return undefined;
+  return { inline_keyboard: [[{ text: label, web_app: { url: `${app}/telegram.html` } }]] };
+}
+
+async function handlePrivateStart(msg: Any, payload: string) {
+  const app = await appUrl();
+  const from = msg.from ?? {};
+  const name = [from.first_name, from.last_name].filter(Boolean).join(" ");
+
+  if (payload.startsWith("c_")) {
+    const { data } = await db.rpc("telegram_connect_user", {
+      p_token: payload.slice(2), p_tg_user_id: from.id, p_username: from.username ?? null, p_name: name || null,
+    });
+    if (!data?.ok) {
+      await reply(msg.chat.id, "❌ Este link de conexão expirou ou já foi usado. No portal, clique de novo em <b>Conectar Telegram</b>.");
+      return;
+    }
+    await tg("sendMessage", {
+      chat_id: msg.chat.id, parse_mode: "HTML",
+      text: `✅ Telegram conectado à conta de <b>${esc(data.name ?? "")}</b>.\nAgora você abre o portal por aqui, sem senha.`,
+      reply_markup: portalKeyboard(app),
+    });
+    return;
+  }
+
+  const { data: acc } = await db.rpc("telegram_login_lookup", { p_tg_user_id: from.id });
+  if (acc?.user_id) {
+    await tg("sendMessage", {
+      chat_id: msg.chat.id, parse_mode: "HTML",
+      text: `Olá, <b>${esc(acc.name ?? name)}</b>! Toque no botão para ver suas tarefas, materiais e aprovações.`,
+      reply_markup: portalKeyboard(app),
+    });
+    return;
+  }
+  const login = app ? `\n\n${esc(app)}/index.html` : "";
+  await reply(msg.chat.id,
+    "Para abrir o portal por aqui, entre uma vez pelo navegador com seu e-mail e senha e clique em <b>📱 Conectar Telegram</b>." + login);
+}
+
+/* initData do Mini App: assinatura HMAC com o token do bot */
+async function hmac(key: ArrayBuffer | Uint8Array, data: string): Promise<ArrayBuffer> {
+  const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return crypto.subtle.sign("HMAC", k, new TextEncoder().encode(data));
+}
+
+async function verifyInitData(initData: string): Promise<Any | null> {
+  const params = new URLSearchParams(initData);
+  const hash = params.get("hash") ?? "";
+  params.delete("hash");
+  const check = [...params.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => `${k}=${v}`).join("\n");
+  const secret = await hmac(new TextEncoder().encode("WebAppData"), BOT_TOKEN);
+  const calc = Array.from(new Uint8Array(await hmac(secret, check))).map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (calc.length !== hash.length) return null;
+  let diff = 0;
+  for (let i = 0; i < calc.length; i++) diff |= calc.charCodeAt(i) ^ hash.charCodeAt(i);
+  if (diff !== 0) return null;
+  const authDate = Number(params.get("auth_date") ?? 0);
+  if (!authDate || Date.now() / 1000 - authDate > 86400) return null; // assinatura de mais de 24 h
+  try {
+    return JSON.parse(params.get("user") ?? "null");
+  } catch {
+    return null;
+  }
+}
+
+async function miniappLogin(body: Any) {
+  if (!BOT_TOKEN) return { ok: false, reason: "not_configured" };
+  const user = await verifyInitData(String(body?.initData ?? ""));
+  if (!user?.id) return { ok: false, reason: "invalid" };
+  const { data: acc } = await db.rpc("telegram_login_lookup", { p_tg_user_id: user.id });
+  if (!acc?.email) return { ok: false, reason: "not_linked" };
+  const { data, error } = await db.auth.admin.generateLink({ type: "magiclink", email: acc.email });
+  if (error || !data?.properties?.hashed_token) return { ok: false, reason: "error" };
+  return { ok: true, token_hash: data.properties.hashed_token, name: acc.name };
 }
 
 /* ------------------------------------------------------------------------- */
@@ -231,6 +323,12 @@ async function setup(body: Any) {
     { command: "ajuda", description: "Como usar o bot" },
   ];
   await tg("setMyCommands", { commands, scope: { type: "all_group_chats" } });
+  await tg("setMyCommands", { commands: [{ command: "start", description: "Abrir o portal do cliente" }], scope: { type: "all_private_chats" } });
+  // Botão de menu da conversa privada abre o portal (Mini App) — exige https
+  const app: string = String(body?.appUrl ?? "").replace(/\/+$/, "");
+  if (/^https:\/\//.test(app)) {
+    await tg("setChatMenuButton", { menu_button: { type: "web_app", text: "Portal", web_app: { url: `${app}/telegram.html` } } });
+  }
   return { ok: true, username: botUsername, name: me.result.first_name, webhookSet: !!webhook, privacy: !me.result.can_read_all_group_messages };
 }
 
@@ -254,6 +352,7 @@ Deno.serve(async (req) => {
   const action = new URL(req.url).searchParams.get("action");
 
   if (action === "dispatch") return json(await dispatch());
+  if (action === "miniapp-login") return json(await miniappLogin(await req.json().catch(() => ({}))));
 
   if (action === "setup" || action === "status") {
     if (!(await requireAdmin(req))) return json({ ok: false, message: "Apenas administradores." }, 403);

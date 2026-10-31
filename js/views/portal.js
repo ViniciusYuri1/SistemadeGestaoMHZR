@@ -61,6 +61,157 @@
   let filterMonth = currentYM();
   let portalTab   = "boletos";
   let selectedCompanyId = null;
+  let tasksView   = "lista";
+  const calRef    = new Date(); calRef.setDate(1);
+  let tgState     = null; // { bot, account } — carregado uma vez por página
+
+  /* Colunas do quadro na linguagem do cliente */
+  const BOARD = [
+    { label: "Na fila",          statuses: ["backlog", "nao_iniciada"] },
+    { label: "Em produção",      statuses: ["em_andamento", "em_revisao", "ajustes"] },
+    { label: "Aguardando você",  statuses: ["aguardando_aprovacao"] },
+    { label: "Concluído",        statuses: ["concluida"] }
+  ];
+  const WEEKDAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+  const MONTHS_FULL = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+
+  function boardHtml(tasks) {
+    const today = DB.todayISO();
+    return `
+      <div class="kanban-board">
+        ${BOARD.map((col) => {
+          const list = tasks.filter((t) => col.statuses.includes(t.status));
+          return `
+          <div class="kanban-column">
+            <div class="kanban-column-header"><span>${col.label}</span><span class="text-muted">${list.length}</span></div>
+            <div class="kanban-cards">
+              ${list.map((t) => {
+                const st = STATUS_TASK[t.status] || STATUS_TASK.nao_iniciada;
+                const overdue = t.status !== "concluida" && t.dueDate < today;
+                return `
+                <div class="kanban-card" data-portal-task="${t.id}" style="cursor:pointer;">
+                  <div class="kc-title-row"><span class="kc-title">${UI.escapeHtml(t.title)}</span></div>
+                  <div style="margin:6px 0;"><span class="badge ${st.badge}">${st.label}</span></div>
+                  <div class="text-sm" style="${overdue ? "color:var(--color-danger);font-weight:700;" : ""}">📅 ${UI.formatDate(t.dueDate)}${overdue ? " ⚠️" : ""}</div>
+                </div>`;
+              }).join("") || `<div class="text-sm text-muted" style="padding:8px;">—</div>`}
+            </div>
+          </div>`;
+        }).join("")}
+      </div>`;
+  }
+
+  function calendarHtml(tasks) {
+    const year = calRef.getFullYear();
+    const month = calRef.getMonth();
+    const firstDay = new Date(year, month, 1).getDay();
+    const days = new Date(year, month + 1, 0).getDate();
+    const today = DB.todayISO();
+    const cells = [];
+    for (let i = 0; i < firstDay; i++) cells.push(null);
+    for (let d = 1; d <= days; d++) cells.push(`${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+    while (cells.length % 7) cells.push(null);
+    return `
+      <div class="flex items-center justify-between" style="margin-bottom:12px;gap:8px;">
+        <button class="btn btn-secondary btn-sm" data-cal-shift="-1">‹</button>
+        <strong>${MONTHS_FULL[month]} de ${year}</strong>
+        <button class="btn btn-secondary btn-sm" data-cal-shift="1">›</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <div class="calendar-month-grid" style="min-width:640px;">
+          ${WEEKDAYS.map((w) => `<div class="cal-weekday">${w}</div>`).join("")}
+          ${cells.map((iso) => {
+            if (!iso) return `<div class="calendar-day-cell outside"></div>`;
+            const list = tasks.filter((t) => t.dueDate === iso);
+            return `
+            <div class="calendar-day-cell ${iso === today ? "today" : ""}">
+              <div class="day-number">${Number(iso.slice(8))}</div>
+              ${list.map((t) => {
+                const cls = t.status === "concluida" ? "done" : t.dueDate < today ? "overdue" : "";
+                return `<div class="cal-event-pill ${cls}" data-portal-task="${t.id}" title="${UI.escapeHtml(t.title)}" style="cursor:pointer;">${t.status === "aguardando_aprovacao" ? "⏳ " : ""}${UI.escapeHtml(t.title)}</div>`;
+              }).join("")}
+            </div>`;
+          }).join("")}
+        </div>
+      </div>
+      <p class="text-sm text-muted" style="margin-top:8px;">As tarefas aparecem na data de entrega prevista.</p>`;
+  }
+
+  /* ---- Conectar Telegram (login sem senha pelo bot) ---- */
+  function loadTelegramState() {
+    if (tgState) return Promise.resolve(tgState);
+    return Promise.all([DB.Telegram.publicInfo(), DB.Telegram.myAccount()]).then(([info, account]) => {
+      tgState = { bot: info.bot_username || null, account };
+      return tgState;
+    });
+  }
+
+  function renderTelegramButton(container, ctx) {
+    const slot = container.querySelector("#portal-tg");
+    if (!slot) return;
+    loadTelegramState().then((st) => {
+      if (!slot.isConnected || !st.bot) return;
+      slot.innerHTML = st.account
+        ? `<button class="btn btn-ghost btn-sm" id="portal-tg-btn" title="Telegram conectado">📱 Telegram conectado</button>`
+        : `<button class="btn btn-secondary btn-sm" id="portal-tg-btn">📱 Conectar Telegram</button>`;
+      slot.querySelector("#portal-tg-btn").addEventListener("click", () => openTelegramConnectModal(container, ctx));
+    });
+  }
+
+  async function openTelegramConnectModal(container, ctx) {
+    const st = tgState;
+    const refresh = () => { tgState = null; UI.hideModal(); window.Views.portal(container, ctx); };
+    if (st.account) {
+      const overlay = UI.showModal(`
+        <div class="modal-header"><h3>📱 Telegram conectado</h3><button class="modal-close" id="tc-close">✕</button></div>
+        <div class="modal-body">
+          <p>Sua conta está ligada ao Telegram <strong>${UI.escapeHtml(st.account.tg_username ? "@" + st.account.tg_username : st.account.tg_name || "")}</strong>.</p>
+          <p class="text-sm text-muted">Para abrir o portal sem senha, abra a conversa com <strong>@${UI.escapeHtml(st.bot)}</strong> e toque em <strong>Portal</strong>. Os avisos de aprovação dos grupos também levam direto para lá.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="tc-off" style="color:var(--color-danger);">Desconectar</button>
+          <a class="btn btn-secondary" href="https://t.me/${encodeURIComponent(st.bot)}" target="_blank" rel="noopener">Abrir o bot</a>
+          <button class="btn btn-primary" id="tc-ok">Fechar</button>
+        </div>`);
+      overlay.querySelector("#tc-close").addEventListener("click", UI.hideModal);
+      overlay.querySelector("#tc-ok").addEventListener("click", UI.hideModal);
+      overlay.querySelector("#tc-off").addEventListener("click", async () => {
+        if (!UI.confirmDialog("Desconectar o Telegram? Você continuará entrando com e-mail e senha.")) return;
+        const r = await DB.Telegram.disconnectMe();
+        if (!r.ok) { UI.toast(r.message, "error"); return; }
+        UI.toast("Telegram desconectado.", "success");
+        refresh();
+      });
+      return;
+    }
+    const r = await DB.Telegram.connectToken();
+    if (!r.ok) { UI.toast(r.message, "error"); return; }
+    const link = `https://t.me/${encodeURIComponent(st.bot)}?start=c_${encodeURIComponent(r.token)}`;
+    const overlay = UI.showModal(`
+      <div class="modal-header"><h3>📱 Conectar Telegram</h3><button class="modal-close" id="tc-close">✕</button></div>
+      <div class="modal-body">
+        <p>Conecte uma vez e passe a abrir o portal pelo Telegram, <strong>sem senha</strong>.</p>
+        <ol class="text-sm" style="margin:0 0 14px 18px;line-height:1.8;">
+          <li>Toque em <strong>Abrir o Telegram</strong> (no celular ou no computador com Telegram).</li>
+          <li>Na conversa com <strong>@${UI.escapeHtml(st.bot)}</strong>, toque em <strong>Iniciar</strong>.</li>
+          <li>Volte aqui e toque em <strong>Já conectei</strong>.</li>
+        </ol>
+        <a class="btn btn-primary" id="tc-link" href="${UI.escapeHtml(link)}" target="_blank" rel="noopener" style="width:100%;justify-content:center;">Abrir o Telegram</a>
+        <p class="text-sm text-muted" style="margin-top:10px;">O link vale 15 minutos e só funciona uma vez. Só a sua conta do Telegram passa a entrar no portal.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="tc-cancel">Cancelar</button>
+        <button class="btn btn-primary" id="tc-done">Já conectei</button>
+      </div>`, { static: true });
+    overlay.querySelector("#tc-close").addEventListener("click", UI.hideModal);
+    overlay.querySelector("#tc-cancel").addEventListener("click", UI.hideModal);
+    overlay.querySelector("#tc-done").addEventListener("click", async () => {
+      const acc = await DB.Telegram.myAccount();
+      if (!acc) { UI.toast("Ainda não recebemos a conexão. Abra o bot e toque em Iniciar.", "error"); return; }
+      UI.toast("Telegram conectado!", "success");
+      refresh();
+    });
+  }
 
   /* ================================================================= */
   /* TELA DE ASSINATURA DO CONTRATO                                     */
@@ -522,7 +673,14 @@
         <div style="padding:12px 16px;background:var(--color-primary-light);border:1px solid var(--color-primary);border-radius:10px;margin-bottom:14px;font-size:14px;font-weight:600;color:var(--color-primary);">
           ⏳ ${awaiting === 1 ? "1 material aguardando" : `${awaiting} materiais aguardando`} ${perms.can_approve ? "a sua aprovação" : "aprovação"}.
         </div>` : ""}
-        ${cards}`;
+        <div class="flex gap-2" style="margin-bottom:14px;flex-wrap:wrap;">
+          ${[["lista", "☰ Lista"], ["quadro", "▦ Quadro"], ["calendario", "📅 Calendário"], ["historico", "📜 Histórico"]].map(([id, label]) =>
+            `<button class="btn btn-sm ${tasksView === id ? "btn-primary" : "btn-secondary"}" data-tasks-view="${id}">${label}</button>`).join("")}
+        </div>
+        ${tasksView === "quadro" ? boardHtml(tasks)
+          : tasksView === "calendario" ? calendarHtml(tasks)
+          : tasksView === "historico" ? `<div class="card"><div class="card-pad" id="portal-history"><div class="text-sm text-muted">Carregando histórico...</div></div></div>`
+          : cards}`;
     }
 
     container.innerHTML = `
@@ -541,6 +699,7 @@
           }).join("")}
         </select>` : ""}
         ${hasSignedContract && perms.can_view_financial ? `<button class="btn btn-secondary" id="btn-view-contract" style="flex-shrink:0;">📄 Contrato</button>` : ""}
+        <div id="portal-tg" style="flex-shrink:0;"></div>
       </div>
       ${tabBar}
       <div id="portal-tab-content">${!tabs.length
@@ -561,6 +720,34 @@
     const monthSel = container.querySelector("#portal-month");
     if (monthSel) {
       monthSel.addEventListener("change", (e) => { filterMonth = e.target.value; window.Views.portal(container, ctx); });
+    }
+
+    renderTelegramButton(container, ctx);
+
+    container.querySelectorAll("[data-tasks-view]").forEach((btn) => {
+      btn.addEventListener("click", () => { tasksView = btn.dataset.tasksView; window.Views.portal(container, ctx); });
+    });
+    container.querySelectorAll("[data-cal-shift]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        calRef.setMonth(calRef.getMonth() + Number(btn.dataset.calShift));
+        window.Views.portal(container, ctx);
+      });
+    });
+
+    /* Histórico da unidade: eventos visíveis ao cliente de todas as tarefas */
+    const historyBox = container.querySelector("#portal-history");
+    if (historyBox) {
+      const unitTasks = DB.Tasks.list({ companyId: selectedCompanyId || "_none", includeArchived: true });
+      const titles = unitTasks.reduce((m, t) => { m[t.id] = t.title; return m; }, {});
+      DB.TaskEvents.listForTasks(unitTasks.map((t) => t.id), 100).then((events) => {
+        if (!historyBox.isConnected) return;
+        const rows = events.map((ev) => ({ ev, text: portalEventText(ev, ctx) })).filter((x) => x.text);
+        historyBox.innerHTML = rows.length ? rows.map(({ ev, text }) => `
+          <div style="padding:9px 0;border-bottom:1px solid var(--border-color);">
+            <div class="text-sm" style="font-weight:700;">${UI.escapeHtml(titles[ev.task_id] || "Tarefa")}</div>
+            <div class="text-sm">${text}</div>
+            <div class="text-sm text-muted">${fmtDateTime(ev.created_at)}</div>
+          </div>`).join("") : `<div class="text-sm text-muted">Nenhum registro ainda.</div>`;      });
     }
 
     container.querySelectorAll("[data-portal-task]").forEach((btn) => {

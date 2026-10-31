@@ -83,6 +83,10 @@ Antes de subir para produção, teste tudo numa cópia local do Supabase
 - Vincular: Financeiro → Empresas → 📣 (grupo do cliente) ou Configurações →
   Telegram → Grupo da equipe. O CRM gera `/vincular@bot CÓDIGO` para colar
   no grupo.
+- Login sem senha (clientes): no portal, **📱 Conectar Telegram** liga a conta
+  do Telegram ao representante (uma vez). Depois o portal abre pelo bot
+  (`telegram.html`, Mini App) — a função confere a assinatura do Telegram
+  antes de criar a sessão. Equipe continua com e-mail e senha.
 
 ## Regras de banco
 

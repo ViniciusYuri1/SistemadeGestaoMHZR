@@ -70,4 +70,12 @@ begin
 end;
 $$;
 
+-- O seed roda depois das migrations, então a cópia do histórico (task_events)
+-- não alcança estas tarefas: cria os eventos iniciais como em produção.
+insert into public.task_events (task_id, created_at, actor, type, visibility, data) values
+  ('task_seed_1', '2026-10-28 12:00+00', null, 'created', 'client', '{"backfill": true}'),
+  ('task_seed_1', '2026-10-29 13:00+00', (select id::text from public.profiles where data ->> 'email' = 'murillo@empresa.com'), 'comment', 'internal', '{"text": "Usar a paleta nova da marca", "backfill": true}'),
+  ('task_seed_2', '2026-10-25 12:00+00', null, 'created', 'client', '{"backfill": true}'),
+  ('task_seed_3', '2026-10-29 12:00+00', null, 'created', 'client', '{"backfill": true}');
+
 alter table public.profiles enable trigger protect_profile_fields;

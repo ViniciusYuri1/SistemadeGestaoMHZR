@@ -219,7 +219,7 @@
       if (appUrl && !/^https?:\/\//.test(appUrl)) { UI.toast("Informe o endereço completo, começando com https://", "error"); return; }
       btn.disabled = true;
       btn.textContent = "Ativando...";
-      const setup = await DB.Telegram.call("setup", { webhookUrl: `${DB.Telegram.functionsUrl()}/telegram` });
+      const setup = await DB.Telegram.call("setup", { webhookUrl: `${DB.Telegram.functionsUrl()}/telegram`, appUrl });
       const saved = await DB.Telegram.saveConfig(appUrl, setup.ok ? setup.username : null);
       btn.disabled = false;
       btn.textContent = "Salvar e ativar bot";

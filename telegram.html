@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Portal do Cliente — GestãoMHZR</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%237c3aed' d='M12 0c0 6.5 1 10.5 12 12-11 1.5-12 5.5-12 12 0-6.5-1-10.5-12-12 11-1.5 12-5.5 12-12z'/%3E%3C/svg%3E" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <style>
+    body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--bg-app); }
+    .tg-card { max-width: 380px; width: 100%; text-align: center; padding: 32px 24px; }
+    .tg-card img { width: 56px; height: 56px; margin-bottom: 14px; }
+    .tg-spinner { width: 28px; height: 28px; margin: 18px auto 0; border: 3px solid var(--border-color); border-top-color: var(--color-primary); border-radius: 50%; animation: tgspin .8s linear infinite; }
+    @keyframes tgspin { to { transform: rotate(360deg); } }
+  </style>
+  <!-- Mini App do Telegram: entra no portal sem senha. A sessão só é criada
+       para a conta do Telegram conectada (a função confere a assinatura). -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="card tg-card">
+    <img src="logo-sem-fundo-novo.png" alt="" />
+    <h2 style="margin:0 0 6px;">Portal do Cliente</h2>
+    <p class="text-sm text-muted" id="tg-msg">Entrando com o seu Telegram...</p>
+    <div class="tg-spinner" id="tg-spin"></div>
+    <a class="btn btn-primary" id="tg-web" href="index.html" style="display:none;margin-top:18px;">Entrar com e-mail e senha</a>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabase-config.js"></script>
+  <script src="js/supabase-client.js"></script>
+  <script>
+    (async function () {
+      const msg = document.getElementById("tg-msg");
+      const fail = (text) => {
+        msg.innerHTML = text;
+        document.getElementById("tg-spin").style.display = "none";
+        document.getElementById("tg-web").style.display = "";
+      };
+
+      const app = window.Telegram && window.Telegram.WebApp;
+      let initData = app && app.initData;
+      if (!initData) {
+        /* Sem o script do Telegram (rede bloqueada), lê direto do endereço */
+        const hash = new URLSearchParams(location.hash.slice(1));
+        initData = hash.get("tgWebAppData") || "";
+      }
+      if (app) { try { app.ready(); app.expand(); } catch (e) {} }
+      if (!initData) return fail("Esta página abre pelo bot no Telegram.<br>No computador, entre com e-mail e senha.");
+      if (!window.SB) return fail("Sistema indisponível no momento.");
+
+      try {
+        const base = window.SUPABASE_CONFIG.url.replace(/\/$/, "");
+        const res = await fetch(`${base}/functions/v1/telegram?action=miniapp-login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData })
+        });
+        const out = await res.json();
+        if (!out.ok) {
+          if (out.reason === "not_linked") {
+            return fail("Seu Telegram ainda não está conectado a uma conta do portal.<br><br>Entre uma vez com e-mail e senha e clique em <strong>📱 Conectar Telegram</strong>.");
+          }
+          return fail("Não foi possível confirmar o seu Telegram. Feche e abra o portal de novo pelo bot.");
+        }
+        const { error } = await window.SB.auth.verifyOtp({ token_hash: out.token_hash, type: "magiclink" });
+        if (error) return fail("Não foi possível entrar. Tente novamente pelo bot.");
+        location.replace("app.html#/portal");
+      } catch (e) {
+        fail("Sem conexão com o servidor. Verifique a internet e tente de novo.");
+      }
+    })();
+  </script>
+</body>
+</html>

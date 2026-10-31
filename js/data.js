@@ -867,6 +867,23 @@
   };
 
   const TaskEvents = {
+    /* Últimos eventos de várias tarefas (portal: histórico da unidade) */
+    listForTasks(taskIds, limit) {
+      if (taskEventsUnavailable || !taskIds.length) return Promise.resolve([]);
+      return sb()
+        .from("task_events")
+        .select("id,task_id,created_at,actor,type,visibility,data")
+        .in("task_id", taskIds.slice(0, 300))
+        .order("created_at", { ascending: false })
+        .limit(limit || 80)
+        .then(({ data, error }) => {
+          if (error) {
+            if (isMissingTable(error)) taskEventsUnavailable = true;
+            return [];
+          }
+          return data || [];
+        });
+    },
     list(taskId) {
       if (taskEventsUnavailable) return Promise.resolve([]);
       return sb()
@@ -1013,6 +1030,32 @@
       const { error } = await sb().rpc("telegram_admin_unlink", { p_id: chat.id });
       if (error) return { ok: false, message: friendlyError(error) };
       addAuditLog({ action: "Telegram", type: "Integração", targetId: String(chat.chat_id), targetName: chat.title || "Grupo", details: "Grupo desvinculado" });
+      return { ok: true };
+    },
+    /* ---- Login pelo Telegram (contas do portal) ---- */
+    publicInfo() {
+      return sb().rpc("telegram_public_info").then(({ data, error }) => (error ? {} : data || {}));
+    },
+    myAccount() {
+      return sb().from("telegram_accounts").select("*").eq("user_id", currentUser && currentUser.id).maybeSingle()
+        .then(({ data, error }) => (error ? null : data));
+    },
+    accounts() {
+      return sb().from("telegram_accounts").select("*").then(({ data, error }) => (error ? [] : data || []));
+    },
+    async connectToken() {
+      const { data, error } = await sb().rpc("create_telegram_connect_token");
+      return error ? { ok: false, message: friendlyError(error) } : { ok: true, token: data };
+    },
+    async disconnectMe() {
+      const { error } = await sb().rpc("telegram_disconnect_me");
+      return error ? { ok: false, message: friendlyError(error) } : { ok: true };
+    },
+    async adminDisconnect(userId) {
+      const { error } = await sb().rpc("telegram_admin_disconnect", { p_user_id: userId });
+      if (error) return { ok: false, message: friendlyError(error) };
+      const u = db.users.find((x) => x.id === userId);
+      addAuditLog({ action: "Telegram", type: "Usuário", targetId: userId, targetName: u ? u.name : userId, targetRole: "company", details: "Telegram desconectado pelo admin" });
       return { ok: true };
     },
     outbox(limit) {

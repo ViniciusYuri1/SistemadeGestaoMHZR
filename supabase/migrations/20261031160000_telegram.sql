@@ -103,6 +103,7 @@ as $$
   select value from private.settings where key = p_key;
 $$;
 revoke execute on function public.telegram_setting(text) from public, anon, authenticated;
+grant execute on function public.telegram_setting(text) to service_role;
 
 create or replace function public.set_telegram_config(p_functions_url text, p_app_url text, p_bot_username text default null)
 returns void
@@ -324,6 +325,18 @@ $$;
 -- Montagem e enfileiramento das mensagens
 -- ---------------------------------------------------------------------------
 
+-- Link dos botões para clientes: abre a conversa com o bot, que entrega o
+-- portal (Mini App, sem senha). Sem bot configurado, cai no site.
+create or replace function public.telegram_client_url()
+returns text
+language sql stable security definer
+set search_path = public
+as $$
+  select coalesce(
+    'https://t.me/' || public.telegram_setting('bot_username') || '?start=portal',
+    public.telegram_setting('app_url') || '/app.html#/portal');
+$$;
+
 create or replace function public.tg_esc(p text)
 returns text
 language sql immutable
@@ -339,7 +352,12 @@ set search_path = public
 as $$
 declare
   v_app  text := public.telegram_setting('app_url');
-  v_url  text := case when v_app is not null and p_button_path is not null then v_app || p_button_path end;
+  -- Cliente: o botão abre o bot (login sem senha pelo Telegram); equipe: o CRM.
+  v_url  text := case
+                   when p_button_path is null then null
+                   when p_to_clients then public.telegram_client_url()
+                   when v_app is not null then v_app || p_button_path
+                 end;
   v_n    integer;
 begin
   insert into public.notification_outbox (chat_id, kind, ref, text, button_text, button_url)
@@ -454,8 +472,8 @@ begin
     insert into public.notification_outbox (chat_id, kind, text, button_text, button_url)
     values (r.chat_id, 'reminder_client',
             '⏰ <b>Lembrete: material aguardando aprovação</b>' || E'\n' || r.lines,
-            case when public.telegram_setting('app_url') is not null then 'Ver e aprovar' end,
-            case when public.telegram_setting('app_url') is not null then public.telegram_setting('app_url') || '/app.html#/portal' end);
+            case when public.telegram_client_url() is not null then 'Ver e aprovar' end,
+            public.telegram_client_url());
     v_n := v_n + 1;
   end loop;
 
@@ -532,7 +550,7 @@ begin
     'telegram_link_chat(text, bigint, text, text)', 'telegram_chat_left(bigint)', 'telegram_chat_migrated(bigint, bigint)',
     'telegram_pending_text(bigint)', 'telegram_claim_outbox(integer)', 'telegram_outbox_result(bigint, boolean, text, integer, boolean)',
     'telegram_enqueue(text, text, text[], boolean, boolean, text, text, text)', 'telegram_enqueue_reminders()',
-    'telegram_kick_dispatch()']
+    'telegram_kick_dispatch()', 'telegram_client_url()']
   loop
     execute format('revoke execute on function public.%s from public, anon, authenticated', f);
     execute format('grant execute on function public.%s to service_role', f);
