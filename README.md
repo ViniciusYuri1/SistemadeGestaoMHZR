@@ -88,6 +88,21 @@ Antes de subir para produção, teste tudo numa cópia local do Supabase
   (`telegram.html`, Mini App) — a função confere a assinatura do Telegram
   antes de criar a sessão. Equipe continua com e-mail e senha.
 
+## Meta Ads (métricas e alertas)
+
+- Código: `supabase/functions/meta-sync/index.ts` + migration
+  `20261031180000_meta_ads.sql`. Lê o Meta a cada hora (pg_cron).
+- Publicar como a função do Telegram: nome `meta-sync`, **"Verify JWT"
+  desligado**, segredo `META_ACCESS_TOKEN` (token do Usuário do sistema do
+  Business Manager com `ads_read`).
+- Vincular contas: Configurações → Meta Ads → **Buscar contas no Meta** →
+  escolher o cliente/unidade. Limites de alerta por conta na mesma tela.
+- Equipe: menu **Campanhas**. Cliente: aba **Campanhas** do portal (precisa
+  da permissão "Ver campanhas" em 🔑 Acessos do cliente).
+- Teste local: `node scripts/mock-meta.mjs` (porta 5601) e, no
+  `supabase/functions/.env.local`, `META_ACCESS_TOKEN=TESTE-META` e
+  `META_API_BASE=http://host.docker.internal:5601`.
+
 ## Regras de banco
 
 - Nunca edite uma migration já aplicada — crie uma nova

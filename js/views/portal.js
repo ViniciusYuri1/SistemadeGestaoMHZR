@@ -529,7 +529,7 @@
       return;
     }
 
-    const tabs = [["boletos", "🧾 Boletos", perms.can_view_financial], ["tarefas", "✅ Tarefas", perms.can_view_tasks]]
+    const tabs = [["boletos", "🧾 Boletos", perms.can_view_financial], ["tarefas", "✅ Tarefas", perms.can_view_tasks], ["campanhas", "📈 Campanhas", perms.can_view_campaigns && !!window.CampaignsPanel]]
       .filter((t) => t[2]);
     if (!tabs.some((t) => t[0] === portalTab) && tabs.length) portalTab = tabs[0][0];
 
@@ -704,7 +704,12 @@
       ${tabBar}
       <div id="portal-tab-content">${!tabs.length
         ? `<div class="empty-state"><div class="empty-icon">🔒</div>Nenhuma área liberada para você nesta unidade.</div>`
-        : portalTab === "boletos" ? renderBoletosContent() : renderTarefasContent()}</div>`;
+        : portalTab === "boletos" ? renderBoletosContent()
+        : portalTab === "campanhas" ? `<div id="portal-campaigns"></div>`
+        : renderTarefasContent()}</div>`;
+
+    const campEl = container.querySelector("#portal-campaigns");
+    if (campEl) window.CampaignsPanel.render(campEl, { companyIds: [selectedCompanyId], staff: false });
 
     const unitSel = container.querySelector("#portal-unit");
     if (unitSel) unitSel.addEventListener("change", (e) => { selectedCompanyId = e.target.value; window.Views.portal(container, ctx); });

@@ -233,6 +233,115 @@
     });
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Meta Ads                                                            */
+  /* ------------------------------------------------------------------ */
+
+  function metaSectionHtml() {
+    return `
+      <div class="card">
+        <div class="card-header"><h3 class="card-title">📈 Meta Ads</h3></div>
+        <div class="card-pad" id="meta-body"><div class="text-sm text-muted">Carregando...</div></div>
+      </div>`;
+  }
+
+  function companyOptions(selected) {
+    return DB.Companies.list().map((c) => `<option value="${c.id}" ${c.id === selected ? "selected" : ""}>${UI.escapeHtml(c.name)}</option>`).join("");
+  }
+
+  async function loadMetaSection(container) {
+    const body = container.querySelector("#meta-body");
+    if (!body) return;
+    const { accounts, unavailable } = await DB.Meta.accounts();
+    if (!body.isConnected) return;
+    if (unavailable) {
+      body.innerHTML = `<div class="text-sm text-muted">Integração ainda não configurada no banco (migration do Meta Ads pendente).</div>`;
+      return;
+    }
+    const coName = (id) => (DB.Companies.get(id) || {}).name || id;
+    body.innerHTML = `
+      <div class="flex-col gap-3">
+        <p class="text-sm text-muted" style="margin:0;">As métricas são lidas do Meta a cada hora. Os alertas vão para o grupo da equipe no Telegram e aparecem em <strong>Campanhas</strong>.</p>
+
+        <div>
+          <div style="font-weight:700;margin-bottom:6px;">Contas vinculadas</div>
+          ${accounts.length ? `
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead><tr><th>Conta</th><th>Cliente / unidade</th><th>Última leitura</th><th title="Alerta quando o custo por lead de ontem passar deste valor">Custo/lead máx. (R$)</th><th title="Alerta quando o gasto do dia passar deste % do orçamento diário">Gasto do dia (%)</th><th>Ativa</th><th></th></tr></thead>
+              <tbody>${accounts.map((a) => `
+                <tr data-meta-acc="${a.id}">
+                  <td><div style="font-weight:600;">${UI.escapeHtml(a.name || a.account_id)}</div><div class="text-sm text-muted">${UI.escapeHtml(a.account_id)}</div></td>
+                  <td class="text-sm">${UI.escapeHtml(coName(a.company_id))}</td>
+                  <td class="text-sm">${a.last_sync_at ? UI.formatDateTime(a.last_sync_at) : "—"}${a.last_error ? `<div style="color:var(--color-danger);">${UI.escapeHtml(a.last_error)}</div>` : ""}</td>
+                  <td><input type="number" min="0" step="0.01" class="form-control" data-f="cpl" value="${a.cpl_max == null ? "" : a.cpl_max}" placeholder="—" style="width:110px;" /></td>
+                  <td><input type="number" min="0" step="5" class="form-control" data-f="pct" value="${a.spend_pct_alert == null ? "" : a.spend_pct_alert}" placeholder="—" style="width:90px;" /></td>
+                  <td><input type="checkbox" data-f="active" ${a.active ? "checked" : ""} /></td>
+                  <td><button class="btn btn-secondary btn-sm" data-meta-save>Salvar</button></td>
+                </tr>`).join("")}</tbody>
+            </table>
+          </div>` : `<div class="text-sm text-muted">Nenhuma conta vinculada ainda.</div>`}
+        </div>
+
+        <div style="border-top:1px solid var(--border-color);padding-top:14px;">
+          <div class="flex items-center justify-between" style="gap:8px;flex-wrap:wrap;">
+            <div style="font-weight:700;">Vincular conta de anúncios</div>
+            <button class="btn btn-secondary btn-sm" id="meta-fetch">Buscar contas no Meta</button>
+          </div>
+          <div id="meta-available" style="margin-top:8px;"></div>
+          <div class="flex gap-2" style="margin-top:10px;flex-wrap:wrap;align-items:flex-end;">
+            <div class="form-group" style="margin:0;"><label class="form-label">ID da conta</label><input class="form-control" id="meta-new-id" placeholder="act_1234567890" style="width:190px;" /></div>
+            <div class="form-group" style="margin:0;"><label class="form-label">Cliente / unidade</label><select class="form-control" id="meta-new-co" style="min-width:220px;">${companyOptions()}</select></div>
+            <button class="btn btn-primary btn-sm" id="meta-new-link">Vincular</button>
+          </div>
+        </div>
+      </div>`;
+
+    body.querySelectorAll("[data-meta-acc]").forEach((row) => {
+      row.querySelector("[data-meta-save]").addEventListener("click", async () => {
+        const cpl = row.querySelector('[data-f="cpl"]').value;
+        const pctV = row.querySelector('[data-f="pct"]').value;
+        const r = await DB.Meta.update(row.dataset.metaAcc, cpl === "" ? null : Number(cpl), pctV === "" ? null : Math.round(Number(pctV)), row.querySelector('[data-f="active"]').checked);
+        UI.toast(r.ok ? "Conta atualizada." : r.message, r.ok ? "success" : "error");
+        if (r.ok) loadMetaSection(container);
+      });
+    });
+
+    const link = async (accountId, companyId, name, currency) => {
+      const r = await DB.Meta.link(companyId, accountId, name, currency);
+      UI.toast(r.ok ? "Conta vinculada. Os dados aparecem na próxima leitura (ou em Campanhas → Sincronizar agora)." : r.message, r.ok ? "success" : "error");
+      if (r.ok) loadMetaSection(container);
+    };
+    body.querySelector("#meta-new-link").addEventListener("click", () => {
+      const id = body.querySelector("#meta-new-id").value.trim();
+      if (!id) { UI.toast("Informe o ID da conta de anúncios.", "error"); return; }
+      link(id, body.querySelector("#meta-new-co").value);
+    });
+    body.querySelector("#meta-fetch").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      const box = body.querySelector("#meta-available");
+      btn.disabled = true;
+      box.innerHTML = `<div class="text-sm text-muted">Consultando o Meta...</div>`;
+      const r = await DB.Meta.call("accounts");
+      btn.disabled = false;
+      if (!r.ok) { box.innerHTML = `<div class="text-sm" style="color:var(--color-danger);">${UI.escapeHtml(r.message || "Falha ao consultar o Meta.")}</div>`; return; }
+      const linked = accounts.reduce((m, a) => { m[a.account_id] = a; return m; }, {});
+      box.innerHTML = r.accounts.length ? r.accounts.map((a) => `
+        <div class="flex items-center gap-2" style="padding:6px 0;border-bottom:1px solid var(--border-color);flex-wrap:wrap;" data-avail="${UI.escapeHtml(a.id)}">
+          <div style="flex:1;min-width:200px;"><strong>${UI.escapeHtml(a.name || a.id)}</strong> <span class="text-sm text-muted">${UI.escapeHtml(a.id)}</span></div>
+          ${linked[a.id] && linked[a.id].active ? `<span class="text-sm text-muted">vinculada a ${UI.escapeHtml(coName(linked[a.id].company_id))}</span>` : `
+          <select class="form-control" style="width:auto;min-width:200px;">${companyOptions(linked[a.id] && linked[a.id].company_id)}</select>
+          <button class="btn btn-primary btn-sm">Vincular</button>`}
+        </div>`).join("") : `<div class="text-sm text-muted">O token não tem acesso a nenhuma conta de anúncios.</div>`;
+      box.querySelectorAll("[data-avail]").forEach((row) => {
+        const b = row.querySelector("button");
+        if (!b) return;
+        const a = r.accounts.find((x) => x.id === row.dataset.avail);
+        b.addEventListener("click", () => link(a.id, row.querySelector("select").value, a.name, a.currency));
+      });
+    });
+  }
+
   /* Vincular grupos a uma empresa (companyId) ou à equipe (null) */
   window.Views.openTelegramLinkModal = function (companyId, onChange) {
     const company = companyId ? DB.Companies.get(companyId) : null;
@@ -344,11 +453,13 @@
       ${notificationsSectionHtml()}
       ${isAdmin ? companySectionHtml() : ""}
       ${isAdmin ? telegramSectionHtml() : ""}
+      ${isAdmin ? metaSectionHtml() : ""}
       ${isAdmin ? databaseSectionHtml() : ""}
     `;
 
     bindEvents(container, ctx);
     if (isAdmin) loadTelegramSection(container, ctx);
+    if (isAdmin) loadMetaSection(container);
   }
 
   function bindEvents(container, ctx) {

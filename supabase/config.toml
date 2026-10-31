@@ -419,3 +419,7 @@ enabled = true
 # header secreto do webhook e o login do admin).
 [functions.telegram]
 verify_jwt = false
+
+# Métricas do Meta Ads: chamada pelo pg_cron (chave própria) e pelo admin.
+[functions.meta-sync]
+verify_jwt = false

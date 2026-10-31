@@ -1065,6 +1065,61 @@
     }
   };
 
+  /* ---- Meta Ads (contas, campanhas, métricas e alertas) ---- */
+
+  const Meta = {
+    /* Ações de admin na Edge Function meta-sync: accounts | sync-now */
+    async call(action, body) {
+      try {
+        const { data } = await sb().auth.getSession();
+        const token = data && data.session && data.session.access_token;
+        const res = await fetch(`${Telegram.functionsUrl()}/meta-sync?action=${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body || {})
+        });
+        if (res.status === 404) return { ok: false, message: "A função \"meta-sync\" ainda não foi publicada no Supabase." };
+        const json = await res.json().catch(() => ({}));
+        return Object.assign({ ok: res.ok }, json);
+      } catch (e) {
+        return { ok: false, message: "Não foi possível falar com a função \"meta-sync\" (ela já foi publicada?)." };
+      }
+    },
+    accounts() {
+      return sb().from("meta_ad_accounts").select("*").order("created_at", { ascending: true })
+        .then(({ data, error }) => (error ? { accounts: [], unavailable: isMissingTable(error) } : { accounts: data || [], unavailable: false }));
+    },
+    async link(companyId, accountId, name, currency) {
+      const { error } = await sb().rpc("meta_link_account", { p_company_id: companyId, p_account_id: accountId, p_name: name || null, p_currency: currency || null });
+      if (error) return { ok: false, message: friendlyError(error) };
+      const co = db.companies.find((c) => c.id === companyId);
+      addAuditLog({ action: "Meta Ads", type: "Integração", targetId: accountId, targetName: name || accountId, companyId, companyName: co ? co.name : "", details: "Conta de anúncios vinculada" });
+      return { ok: true };
+    },
+    async update(id, cplMax, spendPct, active) {
+      const { error } = await sb().rpc("meta_update_account", { p_id: id, p_cpl_max: cplMax, p_spend_pct_alert: spendPct, p_active: active });
+      return error ? { ok: false, message: friendlyError(error) } : { ok: true };
+    },
+    /* Contas (das empresas pedidas ou todas), campanhas e métricas do período */
+    async data(companyIds, from, to) {
+      const acc = await Meta.accounts();
+      if (acc.unavailable) return { unavailable: true, accounts: [], campaigns: [], insights: [] };
+      const accounts = acc.accounts.filter((a) => a.active && (!companyIds || companyIds.includes(a.company_id)));
+      const ids = accounts.map((a) => a.account_id);
+      if (!ids.length) return { accounts, campaigns: [], insights: [] };
+      const [c, i] = await Promise.all([
+        sb().from("meta_campaigns").select("*").in("account_id", ids),
+        sb().from("meta_insights_daily").select("campaign_id,date,account_id,spend,impressions,reach,clicks,leads,conversations")
+          .in("account_id", ids).gte("date", from).lte("date", to).limit(10000)
+      ]);
+      return { accounts, campaigns: c.data || [], insights: i.data || [] };
+    },
+    alerts(limit) {
+      return sb().from("meta_alerts").select("*").order("created_at", { ascending: false }).limit(limit || 20)
+        .then(({ data, error }) => (error ? [] : data || []));
+    }
+  };
+
   const Tasks = {
     companyIdsOf: taskCompanyIds,
     companyNamesOf: taskCompanyNames,
@@ -1683,6 +1738,7 @@
     TaskFiles,
     TaskApprovals,
     Telegram,
+    Meta,
     CompanyMembers,
     Users,
     Teams,
