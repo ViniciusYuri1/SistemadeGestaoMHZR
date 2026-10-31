@@ -50,6 +50,8 @@
     nao_iniciada: { label: "A Fazer",      badge: "badge-nao_iniciada", step: 1 },
     em_andamento: { label: "Em Progresso", badge: "badge-em_andamento", step: 2 },
     em_revisao:   { label: "Revisão",      badge: "badge-em_revisao",   step: 3 },
+    aguardando_aprovacao: { label: "Aguardando sua aprovação", badge: "badge-aguardando_aprovacao", step: 3 },
+    ajustes:      { label: "Em ajustes",   badge: "badge-ajustes",      step: 2 },
     concluida:    { label: "Concluído",    badge: "badge-concluida",    step: 4 }
   };
   const PRIORITY_TASK = { baixa: "Baixa", media: "Média", alta: "Alta", urgente: "Urgente" };
@@ -58,6 +60,7 @@
   /* ---- estado interno de filtro ---- */
   let filterMonth = currentYM();
   let portalTab   = "boletos";
+  let selectedCompanyId = null;
 
   /* ================================================================= */
   /* TELA DE ASSINATURA DO CONTRATO                                     */
@@ -197,6 +200,144 @@
   }
 
   /* ================================================================= */
+  /* MODAL: MATERIAL, APROVAÇÃO E HISTÓRICO DE UMA TAREFA               */
+  /* ================================================================= */
+
+  function portalEventText(ev, ctx) {
+    const d = ev.data || {};
+    const who = ev.actor === ctx.user.id ? "Você"
+      : (DB.Users.get(ev.actor) || {}).role === "company" ? DB.Users.get(ev.actor).name
+      : "Equipe";
+    const st = (k) => (STATUS_TASK[k] || {}).label || k || "—";
+    switch (ev.type) {
+      case "created":            return "Tarefa criada";
+      case "status_changed":     return `Status: <strong>${st(d.from)}</strong> → <strong>${st(d.to)}</strong>`;
+      case "approval_requested": return `${who === "Equipe" ? "A equipe" : UI.escapeHtml(who)} enviou material para aprovação: <strong>${UI.escapeHtml((d.files || []).join(", "))}</strong>${d.message ? ` — “${UI.escapeHtml(d.message)}”` : ""}`;
+      case "approval_decided":   return d.decision === "approved"
+        ? `<strong style="color:var(--color-success);">${UI.escapeHtml(who)} aprovou o material</strong>${d.onBehalf ? " (registrado pela equipe)" : ""}`
+        : `<strong style="color:var(--color-danger);">${UI.escapeHtml(who)} pediu ajustes</strong>${d.onBehalf ? " (registrado pela equipe)" : ""}: “${UI.escapeHtml(d.reason || "")}”`;
+      case "approval_cancelled": return "A equipe retirou o material da aprovação";
+      default:                   return null;
+    }
+  }
+
+  function portalFileHtml(f, url) {
+    const mime = f.mime || "";
+    let preview = "";
+    if (url && mime.indexOf("image/") === 0) {
+      preview = `<a href="${UI.escapeHtml(url)}" target="_blank" rel="noopener"><img src="${UI.escapeHtml(url)}" alt="${UI.escapeHtml(f.name)}" style="display:block;max-width:100%;max-height:420px;margin:0 auto;border-radius:8px;" /></a>`;
+    } else if (url && mime.indexOf("video/") === 0) {
+      preview = `<video src="${UI.escapeHtml(url)}" controls preload="metadata" style="display:block;max-width:100%;max-height:420px;margin:0 auto;border-radius:8px;"></video>`;
+    }
+    return `
+      <div style="padding:12px;border:1px solid var(--border-color);border-radius:10px;margin-bottom:10px;">
+        ${preview}
+        <div class="flex items-center justify-between" style="gap:8px;flex-wrap:wrap;${preview ? "margin-top:8px;" : ""}">
+          <div class="text-sm" style="font-weight:600;word-break:break-word;">${UI.escapeHtml(f.name)} <span class="text-muted">(versão ${f.version})</span></div>
+          ${url ? `<a class="btn btn-secondary btn-sm" href="${UI.escapeHtml(url)}" target="_blank" rel="noopener">Abrir / baixar</a>` : `<span class="text-sm text-muted">indisponível</span>`}
+        </div>
+      </div>`;
+  }
+
+  function openPortalTaskModal(ctx, task, canApprove, onDone) {
+    const overlay = UI.showModal(`
+      <div class="modal-header">
+        <h3>${UI.escapeHtml(task.title)}</h3>
+        <button class="modal-close" id="pt-close">✕</button>
+      </div>
+      <div class="modal-body" id="pt-body"><div class="text-sm text-muted">Carregando...</div></div>
+      <div class="modal-footer" id="pt-footer"><button class="btn btn-secondary" id="pt-ok">Fechar</button></div>`, { large: true });
+    overlay.querySelector("#pt-close").addEventListener("click", UI.hideModal);
+    overlay.querySelector("#pt-ok").addEventListener("click", UI.hideModal);
+
+    Promise.all([DB.TaskApprovals.list(task.id), DB.TaskFiles.list(task.id), DB.TaskEvents.list(task.id)]).then(async ([rounds, filesRes, events]) => {
+      const body = overlay.querySelector("#pt-body");
+      if (!body || !body.isConnected) return;
+      const files = filesRes.files.filter((f) => !f.removed_at);
+      const byId = files.reduce((m, f) => { m[f.id] = f; return m; }, {});
+      const pending = rounds.find((r) => r.status === "pending");
+      const decided = rounds.filter((r) => r.status === "approved" || r.status === "rejected");
+      const lastDecided = decided[decided.length - 1];
+      const shown = pending ? (pending.file_ids || []).map((id) => byId[id]).filter(Boolean)
+        : lastDecided ? (lastDecided.file_ids || []).map((id) => byId[id]).filter(Boolean)
+        : [];
+      const urls = await DB.TaskFiles.signedUrls(shown.map((f) => f.path));
+      if (!body.isConnected) return;
+
+      const history = events.map((ev) => ({ ev, text: portalEventText(ev, ctx) })).filter((x) => x.text).reverse();
+
+      body.innerHTML = `
+        ${task.description ? `<div class="text-sm" style="margin-bottom:14px;white-space:pre-wrap;line-height:1.6;">${UI.escapeHtml(task.description)}</div>` : ""}
+
+        ${pending ? `
+        <div style="padding:12px 14px;background:var(--color-primary-light);border:1px solid var(--color-primary);border-radius:10px;margin-bottom:14px;">
+          <div style="font-weight:700;color:var(--color-primary);">⏳ Material aguardando ${canApprove ? "a sua aprovação" : "aprovação"}</div>
+          <div class="text-sm text-muted" style="margin-top:2px;">Enviado em ${fmtDateTime(pending.requested_at)}</div>
+          ${pending.message ? `<div class="text-sm" style="margin-top:6px;white-space:pre-wrap;">💬 ${UI.escapeHtml(pending.message)}</div>` : ""}
+        </div>` : lastDecided ? `
+        <div style="padding:12px 14px;background:${lastDecided.status === "approved" ? "var(--color-success-light)" : "var(--color-danger-light)"};border-radius:10px;margin-bottom:14px;">
+          <div style="font-weight:700;color:${lastDecided.status === "approved" ? "var(--color-success)" : "var(--color-danger)"};">${lastDecided.status === "approved" ? "✅ Material aprovado" : "✏️ Ajustes solicitados"} em ${fmtDateTime(lastDecided.decided_at)}</div>
+          ${lastDecided.reason ? `<div class="text-sm" style="margin-top:6px;white-space:pre-wrap;">${UI.escapeHtml(lastDecided.reason)}</div>` : ""}
+          ${lastDecided.status === "rejected" ? `<div class="text-sm text-muted" style="margin-top:6px;">A equipe está trabalhando nos ajustes e enviará uma nova versão.</div>` : ""}
+        </div>` : ""}
+
+        ${shown.length ? shown.map((f) => portalFileHtml(f, urls[f.path])).join("") : `<div class="text-sm text-muted" style="margin-bottom:14px;">Nenhum material enviado para avaliação ainda.</div>`}
+
+        ${pending && canApprove ? `
+        <div id="pt-reject-box" style="display:none;margin-top:6px;">
+          <label class="form-label" for="pt-reason">O que precisa ser ajustado?</label>
+          <textarea class="form-control" id="pt-reason" rows="3" placeholder="Descreva os ajustes (texto, cores, imagem, prazo...)"></textarea>
+        </div>` : ""}
+
+        <div style="margin-top:18px;">
+          <div class="form-label">📜 Histórico</div>
+          ${history.length ? history.map(({ ev, text }) => `
+            <div style="padding:7px 0;border-bottom:1px solid var(--border-color);">
+              <div class="text-sm">${text}</div>
+              <div class="text-sm text-muted">${fmtDateTime(ev.created_at)}</div>
+            </div>`).join("") : `<div class="text-sm text-muted">Sem registros.</div>`}
+        </div>`;
+
+      if (!(pending && canApprove)) return;
+      const footer = overlay.querySelector("#pt-footer");
+      footer.innerHTML = `
+        <button class="btn btn-secondary" id="pt-ok">Fechar</button>
+        <button class="btn btn-ghost" id="pt-reject" style="color:var(--color-danger);">✏️ Pedir ajustes</button>
+        <button class="btn btn-primary" id="pt-approve">✅ Aprovar material</button>`;
+      footer.querySelector("#pt-ok").addEventListener("click", UI.hideModal);
+
+      const decide = async (decision, btn) => {
+        let reason = null;
+        if (decision === "rejected") {
+          const box = body.querySelector("#pt-reject-box");
+          if (box.style.display === "none") {
+            box.style.display = "";
+            btn.textContent = "Enviar pedido de ajustes";
+            body.querySelector("#pt-reason").focus();
+            return;
+          }
+          reason = body.querySelector("#pt-reason").value.trim();
+          if (reason.length < 3) { UI.toast("Descreva o que precisa ser ajustado.", "error"); return; }
+        } else if (!UI.confirmDialog("Confirmar a aprovação deste material?")) {
+          return;
+        }
+        footer.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+        const res = await DB.TaskApprovals.decide(pending.id, task.id, decision, reason);
+        if (!res.ok) {
+          UI.toast(res.message, "error");
+          footer.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+          return;
+        }
+        UI.toast(decision === "approved" ? "Material aprovado. Obrigado!" : "Pedido de ajustes enviado para a equipe.", "success");
+        UI.hideModal();
+        if (onDone) onDone();
+      };
+      footer.querySelector("#pt-approve").addEventListener("click", (e) => decide("approved", e.currentTarget));
+      footer.querySelector("#pt-reject").addEventListener("click", (e) => decide("rejected", e.currentTarget));
+    });
+  }
+
+  /* ================================================================= */
   /* PORTAL PRINCIPAL (BOLETOS)                                         */
   /* ================================================================= */
 
@@ -213,17 +354,33 @@
         if (container.isConnected) window.Views.portal(container, ctx);
       });
     }
-    const company = ctx.user.companyId ? DB.Companies.get(ctx.user.companyId) : null;
+    /* Unidades que este usuário acessa e o que pode ver em cada uma */
+    const access = DB.CompanyMembers.accessOf();
+    if (!access.length) {
+      container.innerHTML = `<div class="empty-state"><div class="empty-icon">🔒</div>Seu acesso ainda não foi liberado para nenhuma unidade. Fale com a equipe responsável.</div>`;
+      return;
+    }
+    if (!access.some((a) => a.companyId === selectedCompanyId)) {
+      selectedCompanyId = (access.find((a) => a.primary) || access[0]).companyId;
+    }
+    const current = access.find((a) => a.companyId === selectedCompanyId);
+    const perms = current.perms;
+    const company = DB.Companies.get(selectedCompanyId);
 
-    /* Portão de contrato: se existe texto OU arquivo e ainda não foi assinado → tela de assinatura */
+    /* Portão de contrato (unidade principal, para quem vê o financeiro):
+       se existe texto OU arquivo e ainda não foi assinado → tela de assinatura */
     const hasContract = company && (
       (company.contractText && company.contractText.trim()) ||
       company.contractFile
     );
-    if (hasContract && !company.contractSignedAt) {
+    if (hasContract && !company.contractSignedAt && current.primary && perms.can_view_financial) {
       renderContractScreen(container, ctx, company);
       return;
     }
+
+    const tabs = [["boletos", "🧾 Boletos", perms.can_view_financial], ["tarefas", "✅ Tarefas", perms.can_view_tasks]]
+      .filter((t) => t[2]);
+    if (!tabs.some((t) => t[0] === portalTab) && tabs.length) portalTab = tabs[0][0];
 
     const initials          = company ? company.name.split(" ").slice(0, 2).map((p) => p[0]).join("").toUpperCase() : "EM";
     const hasSignedContract = company && hasContract && company.contractSignedAt;
@@ -232,7 +389,7 @@
     /* ---- tabs ---- */
     const tabBar = `
       <div style="display:flex;gap:2px;margin-bottom:22px;border-bottom:2px solid var(--border-color);">
-        ${[["boletos","🧾 Boletos"],["tarefas","✅ Tarefas"]].map(([id, label]) => {
+        ${tabs.map(([id, label]) => {
           const active = portalTab === id;
           return `<button data-portal-tab="${id}" style="padding:10px 20px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:600;color:${active ? "var(--color-primary)" : "var(--text-muted)"};border-bottom:2px solid ${active ? "var(--color-primary)" : "transparent"};margin-bottom:-2px;transition:color .2s,border-color .2s;">${label}</button>`;
         }).join("")}
@@ -240,7 +397,7 @@
 
     /* ===== ABA BOLETOS ===== */
     function renderBoletosContent() {
-      const allBoletos = DB.Boletos.list({ companyId: ctx.user.companyId || "_none" });
+      const allBoletos = DB.Boletos.list({ companyId: selectedCompanyId || "_none" });
       const today      = DB.todayISO();
       if (!allBoletos.some((b) => b.month === filterMonth)) {
         filterMonth = allBoletos.length ? allBoletos[allBoletos.length - 1].month : currentYM();
@@ -289,8 +446,10 @@
     /* ===== ABA TAREFAS ===== */
     function renderTarefasContent() {
       /* Usa "_none" como fallback para nunca vazar tarefas de outros quando companyId for nulo */
-      const tasks = DB.Tasks.list({ companyId: ctx.user.companyId || "_none" });
+      const tasks = DB.Tasks.list({ companyId: selectedCompanyId || "_none" })
+        .sort((x, y) => (y.status === "aguardando_aprovacao") - (x.status === "aguardando_aprovacao"));
       const today = DB.todayISO();
+      const awaiting = tasks.filter((t) => t.status === "aguardando_aprovacao").length;
 
       if (!tasks.length) {
         return `<div class="empty-state"><div class="empty-icon">📋</div>Nenhuma tarefa vinculada à sua empresa ainda.</div>`;
@@ -320,7 +479,7 @@
         }).join("");
 
         return `
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom:14px;${t.status === "aguardando_aprovacao" ? "border:1px solid var(--color-primary);" : ""}">
           <div class="card-pad">
             <div class="flex items-center justify-between" style="margin-bottom:8px;flex-wrap:wrap;gap:6px;">
               <div style="font-weight:700;font-size:15px;flex:1;min-width:0;">${UI.escapeHtml(t.title)}</div>
@@ -330,7 +489,7 @@
 
             <!-- barra de etapas -->
             <div style="display:flex;gap:3px;margin-bottom:10px;">${stepsBar}</div>
-            <div class="text-sm text-muted" style="margin-bottom:12px;">${STEPS_TASK[step]}</div>
+            <div class="text-sm text-muted" style="margin-bottom:12px;">${st.label}</div>
 
             <div class="flex gap-4" style="font-size:13px;flex-wrap:wrap;">
               <div>📅 <span class="text-muted">Prazo:</span> <strong style="${overdue ? "color:var(--color-danger);" : ""}">${UI.formatDate(t.dueDate)}${overdue ? " ⚠️" : ""}</strong></div>
@@ -342,6 +501,12 @@
             </div>
 
             ${(t.tags || []).length ? `<div style="margin-top:10px;">${t.tags.map((tag) => `<span class="tag-pill">${UI.escapeHtml(tag)}</span>`).join(" ")}</div>` : ""}
+
+            <div class="flex gap-2" style="margin-top:12px;justify-content:flex-end;flex-wrap:wrap;">
+              ${t.status === "aguardando_aprovacao"
+                ? `<button class="btn btn-primary btn-sm" data-portal-task="${t.id}">👀 Ver material${perms.can_approve ? " e responder" : ""}</button>`
+                : `<button class="btn btn-ghost btn-sm" data-portal-task="${t.id}">Detalhes e histórico</button>`}
+            </div>
           </div>
         </div>`;
       }).join("");
@@ -353,6 +518,10 @@
             <p class="page-subtitle">${tasks.length} tarefa(s) vinculada(s) à sua empresa.</p>
           </div>
         </div>
+        ${awaiting ? `
+        <div style="padding:12px 16px;background:var(--color-primary-light);border:1px solid var(--color-primary);border-radius:10px;margin-bottom:14px;font-size:14px;font-weight:600;color:var(--color-primary);">
+          ⏳ ${awaiting === 1 ? "1 material aguardando" : `${awaiting} materiais aguardando`} ${perms.can_approve ? "a sua aprovação" : "aprovação"}.
+        </div>` : ""}
         ${cards}`;
     }
 
@@ -362,12 +531,24 @@
         <div style="width:52px;height:52px;background:var(--color-primary);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;flex-shrink:0;">${initials}</div>
         <div style="flex:1;min-width:180px;">
           <h1 style="margin:0;line-height:1.1;">${companyName}</h1>
-          <p class="page-subtitle" style="margin:4px 0 0;">Portal do Cliente</p>
+          <p class="page-subtitle" style="margin:4px 0 0;">Portal do Cliente${company && company.brand ? ` · ${UI.escapeHtml(company.brand)}` : ""}</p>
         </div>
-        ${hasSignedContract ? `<button class="btn btn-secondary" id="btn-view-contract" style="flex-shrink:0;">📄 Contrato</button>` : ""}
+        ${access.length > 1 ? `
+        <select class="form-control" id="portal-unit" style="width:auto;min-width:200px;flex-shrink:0;" title="Unidade">
+          ${access.map((a) => {
+            const c = DB.Companies.get(a.companyId);
+            return `<option value="${a.companyId}" ${a.companyId === selectedCompanyId ? "selected" : ""}>${UI.escapeHtml(c ? c.name : a.companyId)}</option>`;
+          }).join("")}
+        </select>` : ""}
+        ${hasSignedContract && perms.can_view_financial ? `<button class="btn btn-secondary" id="btn-view-contract" style="flex-shrink:0;">📄 Contrato</button>` : ""}
       </div>
       ${tabBar}
-      <div id="portal-tab-content">${portalTab === "boletos" ? renderBoletosContent() : renderTarefasContent()}</div>`;
+      <div id="portal-tab-content">${!tabs.length
+        ? `<div class="empty-state"><div class="empty-icon">🔒</div>Nenhuma área liberada para você nesta unidade.</div>`
+        : portalTab === "boletos" ? renderBoletosContent() : renderTarefasContent()}</div>`;
+
+    const unitSel = container.querySelector("#portal-unit");
+    if (unitSel) unitSel.addEventListener("change", (e) => { selectedCompanyId = e.target.value; window.Views.portal(container, ctx); });
 
     /* ---- eventos ---- */
     container.querySelectorAll("[data-portal-tab]").forEach((btn) => {
@@ -381,6 +562,14 @@
     if (monthSel) {
       monthSel.addEventListener("change", (e) => { filterMonth = e.target.value; window.Views.portal(container, ctx); });
     }
+
+    container.querySelectorAll("[data-portal-task]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const fresh = await DB.Tasks.refresh(btn.dataset.portalTask);
+        if (!fresh) { UI.toast("Tarefa não encontrada.", "error"); window.Views.portal(container, ctx); return; }
+        openPortalTaskModal(ctx, fresh, perms.can_approve, () => window.Views.portal(container, ctx));
+      });
+    });
 
     const contractBtn = container.querySelector("#btn-view-contract");
     if (contractBtn) contractBtn.addEventListener("click", () => openContractViewModal(company));

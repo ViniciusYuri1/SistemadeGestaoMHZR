@@ -8,13 +8,7 @@
   "use strict";
   window.Views = window.Views || {};
 
-  const COLUMNS = [
-    { status: "backlog", label: "Backlog" },
-    { status: "nao_iniciada", label: "A Fazer" },
-    { status: "em_andamento", label: "Em Progresso" },
-    { status: "em_revisao", label: "Revisão" },
-    { status: "concluida", label: "Concluído" }
-  ];
+  const COLUMNS = DB.TASK_STATUSES.map((s) => ({ status: s.key, label: s.label }));
 
   const PRIORITY_LABELS = { baixa: "Baixa", media: "Média", alta: "Alta", urgente: "Urgente" };
 
@@ -144,7 +138,11 @@
         const taskId = e.dataTransfer.getData("text/plain");
         const newStatus = column.dataset.status;
         const task = DB.Tasks.get(taskId);
-        if (task && task.status !== newStatus && (DB.canManageTasks(ctx.user) || task.assignee === ctx.user.id)) {
+        const canMove = task && task.status !== newStatus && (DB.canManageTasks(ctx.user) || task.assignee === ctx.user.id);
+        if (canMove && newStatus === "aguardando_aprovacao") {
+          /* Precisa escolher os arquivos que vão para o cliente */
+          window.Views.openTaskModal(ctx, taskId, () => render(container, ctx), { requestApproval: true });
+        } else if (canMove) {
           DB.Tasks.update(taskId, { status: newStatus });
           UI.toast(
             newStatus === "concluida"

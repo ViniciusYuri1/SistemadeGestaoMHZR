@@ -268,6 +268,8 @@ textarea.form-control { resize: vertical; min-height: 80px; }
 .badge-nao_iniciada { background: var(--bg-hover); color: var(--text-secondary); }
 .badge-em_andamento { background: var(--color-info-light); color: var(--color-info); }
 .badge-em_revisao { background: var(--color-warning-light); color: var(--color-warning); }
+.badge-aguardando_aprovacao { background: var(--color-primary-light); color: var(--color-primary); }
+.badge-ajustes { background: var(--color-danger-light); color: var(--color-danger); }
 .badge-concluida { background: var(--color-success-light); color: var(--color-success); }
 .badge-atrasada { background: var(--color-danger-light); color: var(--color-danger); }
 

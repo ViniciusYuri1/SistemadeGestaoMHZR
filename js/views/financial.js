@@ -507,8 +507,13 @@
   /* EMPRESAS TAB                                                       */
   /* ================================================================= */
 
+  function brandsOf(companies) {
+    return Array.from(new Set(companies.map((c) => (c.brand || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }
+
   function renderEmpresasTab(wrap) {
-    const companies = DB.Companies.list();
+    const companies = DB.Companies.list().sort((a, b) =>
+      ((a.brand || "~").localeCompare(b.brand || "~", "pt-BR")) || a.name.localeCompare(b.name, "pt-BR"));
     const boletos   = DB.Boletos.list();
 
     /* IDs de empresas com usuário de portal ativo mas sem contrato cadastrado */
@@ -523,9 +528,7 @@
         .map((co) => co.id)
     );
 
-    const cards = companies.length === 0
-      ? `<div class="empty-state"><div class="empty-icon">🏢</div>Nenhuma empresa cadastrada ainda.</div>`
-      : companies.map((co) => {
+    const cardOf = (co) => {
           const coB      = boletos.filter((b) => b.companyId === co.id);
           const recebido = coB.filter((b) => b.status === "pago").reduce((s, b) => s + b.amount, 0);
           const aReceber = coB.filter((b) => b.status === "pendente" || b.status === "vencido").reduce((s, b) => s + b.amount, 0);
@@ -565,6 +568,10 @@
                 ${co.email   ? `<div>✉️ ${UI.escapeHtml(co.email)}</div>`   : ""}
                 ${co.phone   ? `<div>📞 ${UI.escapeHtml(co.phone)}</div>`   : ""}
                 ${co.since   ? `<div class="text-muted">Cliente desde ${monthLabel(co.since)}</div>` : ""}
+                ${DB.CompanyMembers.unavailable() ? "" : (() => {
+                  const n = DB.CompanyMembers.forCompany(co.id).length;
+                  return `<div class="text-muted">👥 ${n ? `${n} pessoa${n !== 1 ? "s" : ""} com acesso ao portal` : "Ninguém com acesso ao portal"}</div>`;
+                })()}
               </div>
               <div class="flex gap-4" style="font-size:13px;border-top:1px solid var(--border-color);padding-top:12px;margin-bottom:14px;">
                 <div><div style="color:var(--color-success);font-weight:700;">${brl(recebido)}</div><div class="text-muted">Recebido</div></div>
@@ -575,11 +582,28 @@
                 <button class="btn btn-secondary btn-sm" style="flex:1;" data-edit-company="${co.id}">✏️ Editar</button>
                 <button class="btn btn-secondary btn-sm" data-contract-company="${co.id}" title="Gerenciar contrato">📄</button>
                 <button class="btn btn-primary btn-sm" data-access-company="${co.id}" title="Gerenciar acesso ao portal">🔑</button>
+                ${window.Views.openTelegramLinkModal ? `<button class="btn btn-secondary btn-sm" data-telegram-company="${co.id}" title="Grupos do Telegram">📣</button>` : ""}
                 <button class="btn btn-ghost btn-sm" data-delete-company="${co.id}" title="Excluir">🗑️</button>
               </div>
             </div>
           </div>`;
-        }).join("");
+        };
+
+    const grid = (list) => `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:16px;">${list.map(cardOf).join("")}</div>`;
+    const brands = brandsOf(companies);
+    const cards = companies.length === 0
+      ? `<div class="empty-state"><div class="empty-icon">🏢</div>Nenhuma empresa cadastrada ainda.</div>`
+      : !brands.length
+        ? grid(companies)
+        : brands.concat([""]).map((b) => {
+            const list = companies.filter((c) => (c.brand || "").trim() === b);
+            if (!list.length) return "";
+            return `
+              <div style="margin:4px 0 22px;">
+                <h3 style="font-size:15px;margin:0 0 10px;">${b ? `🏷️ ${UI.escapeHtml(b)}` : "Sem marca"} <span class="text-sm text-muted" style="font-weight:400;">· ${list.length} unidade${list.length !== 1 ? "s" : ""}</span></h3>
+                ${grid(list)}
+              </div>`;
+          }).join("");
 
     const newCount = newCoIds.size;
     const alertBanner = newCount > 0
@@ -596,9 +620,7 @@
         </div>
       </div>
       ${alertBanner}
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:16px;">
-        ${cards}
-      </div>`;
+      ${cards}`;
 
     wrap.querySelector("#btn-new-company").addEventListener("click", () => openCompanyModal(null, () => renderEmpresasTab(wrap)));
     wrap.querySelectorAll("[data-edit-company]").forEach((btn) => {
@@ -613,8 +635,13 @@
     wrap.querySelectorAll("[data-access-company]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const co = DB.Companies.get(btn.dataset.accessCompany);
-        if (co) openCompanyAccessModal(co, () => renderEmpresasTab(wrap));
+        if (!co) return;
+        if (DB.CompanyMembers.unavailable()) openCompanyAccessModal(co, () => renderEmpresasTab(wrap));
+        else openClientAccessModal(co, () => renderEmpresasTab(wrap));
       });
+    });
+    wrap.querySelectorAll("[data-telegram-company]").forEach((btn) => {
+      btn.addEventListener("click", () => window.Views.openTelegramLinkModal(btn.dataset.telegramCompany));
     });
     wrap.querySelectorAll("[data-delete-company]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -1131,6 +1158,166 @@
     });
   }
 
+  /* Acessos do cliente: várias pessoas por unidade, cada uma com permissões
+     por área; uma pessoa pode ter acesso a várias unidades. */
+  function openClientAccessModal(co, onSaved) {
+    const PERMS = DB.CompanyMembers.PERMS;
+    const initials = (name) => name.split(" ").slice(0, 2).map((p) => p[0]).join("").toUpperCase();
+
+    function permBoxes(prefix, perms) {
+      return PERMS.map((p) => `
+        <label class="checkbox-row" style="font-size:13px;">
+          <input type="checkbox" data-${prefix}-perm="${p.key}" ${perms[p.key] ? "checked" : ""} /> ${p.label}
+        </label>`).join("");
+    }
+
+    function render() {
+      const people = DB.CompanyMembers.forCompany(co.id);
+      const others = DB.Users.list().filter((u) => u.role === "company" && !people.some((p) => p.user.id === u.id));
+      const defaults = { can_view_tasks: true, can_approve: true, can_view_financial: false, can_view_campaigns: false };
+
+      const peopleHtml = people.length ? people.map(({ user, access }) => {
+        const units = DB.CompanyMembers.accessOf(user).filter((a) => a.companyId !== co.id)
+          .map((a) => (DB.Companies.get(a.companyId) || {}).name).filter(Boolean);
+        return `
+          <div style="padding:12px 0;border-bottom:1px solid var(--border-color);" data-person="${user.id}">
+            <div class="flex items-center gap-2" style="flex-wrap:wrap;">
+              <div style="flex:1;min-width:180px;">
+                <div style="font-weight:700;">${UI.escapeHtml(user.name)}${access.primary ? ` <span class="badge badge-backlog" style="font-size:10.5px;">unidade principal</span>` : ""}</div>
+                <div class="text-sm text-muted">${UI.escapeHtml(user.email || "")}${units.length ? ` · também acessa: ${UI.escapeHtml(units.join(", "))}` : ""}</div>
+              </div>
+              ${access.primary ? `<button type="button" class="btn btn-ghost btn-sm" data-act="password" title="Definir nova senha">🔒 Senha</button>` : ""}
+              <button type="button" class="btn btn-ghost btn-sm" data-act="remove" style="color:var(--color-danger);">${access.primary && !units.length ? "🚫 Revogar conta" : "Remover desta unidade"}</button>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 12px;margin-top:8px;">${permBoxes("p", access.perms)}</div>
+          </div>`;
+      }).join("") : `<div class="text-sm text-muted" style="padding:10px 0;">Ninguém tem acesso a esta unidade ainda.</div>`;
+
+      const html = `
+        <div class="modal-header">
+          <h3>🔑 Acessos do cliente — ${UI.escapeHtml(co.name)}</h3>
+          <button class="modal-close" id="ac-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="text-sm text-muted" style="margin-bottom:8px;">Cada pessoa vê apenas as unidades e as áreas liberadas aqui. As alterações de permissão são salvas na hora.</p>
+          ${peopleHtml}
+
+          <div class="card" style="margin-top:18px;">
+            <div class="card-pad">
+              <div class="flex gap-2" style="margin-bottom:12px;">
+                <button type="button" class="btn btn-sm btn-primary" id="ac-tab-new">+ Nova pessoa</button>
+                ${others.length ? `<button type="button" class="btn btn-sm btn-secondary" id="ac-tab-link">Vincular pessoa já cadastrada</button>` : ""}
+              </div>
+              <div id="ac-new">
+                <div class="form-row">
+                  <div class="form-group"><label class="form-label">Nome</label><input type="text" class="form-control" id="ac-name" placeholder="Ex: Mariana (marketing)" /></div>
+                  <div class="form-group"><label class="form-label">E-mail de acesso</label><input type="email" class="form-control" id="ac-email" /></div>
+                </div>
+                <div class="form-group"><label class="form-label">Senha inicial</label><input type="text" class="form-control" id="ac-pass" autocomplete="new-password" placeholder="Mínimo 6 caracteres" /></div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 12px;margin-bottom:12px;">${permBoxes("n", defaults)}</div>
+                <button type="button" class="btn btn-primary btn-sm" id="ac-create">Criar acesso</button>
+              </div>
+              <div id="ac-link" style="display:none;">
+                <div class="form-group">
+                  <label class="form-label">Pessoa</label>
+                  <select class="form-control" id="ac-user">
+                    ${others.map((u) => `<option value="${u.id}">${UI.escapeHtml(u.name)} — ${UI.escapeHtml(u.email || "")}</option>`).join("")}
+                  </select>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 12px;margin-bottom:12px;">${permBoxes("l", defaults)}</div>
+                <button type="button" class="btn btn-primary btn-sm" id="ac-do-link">Vincular a esta unidade</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-primary" id="ac-done">Concluir</button></div>`;
+
+      const overlay = UI.showModal(html, { large: true, static: true });
+      const close = () => { UI.hideModal(); if (onSaved) onSaved(); };
+      overlay.querySelector("#ac-close").addEventListener("click", close);
+      overlay.querySelector("#ac-done").addEventListener("click", close);
+
+      const readPerms = (root, prefix) => PERMS.reduce((o, p) => {
+        o[p.key] = root.querySelector(`[data-${prefix}-perm="${p.key}"]`).checked;
+        return o;
+      }, {});
+
+      overlay.querySelectorAll("[data-person]").forEach((row) => {
+        const userId = row.dataset.person;
+        row.querySelectorAll("[data-p-perm]").forEach((cb) => {
+          cb.addEventListener("change", async () => {
+            const res = await DB.CompanyMembers.set(userId, co.id, readPerms(row, "p"));
+            if (!res.ok) { UI.toast(res.message, "error"); cb.checked = !cb.checked; return; }
+            UI.toast("Permissões atualizadas.", "success");
+          });
+        });
+        const pass = row.querySelector('[data-act="password"]');
+        if (pass) pass.addEventListener("click", async () => {
+          const p = window.prompt("Nova senha (mínimo 6 caracteres):");
+          if (p === null) return;
+          if (p.trim().length < 6) { UI.toast("A senha deve ter pelo menos 6 caracteres.", "error"); return; }
+          const res = await DB.Users.update(userId, { password: p.trim() });
+          UI.toast(res.ok ? "Senha atualizada." : (res.message || "Não foi possível alterar a senha."), res.ok ? "success" : "error");
+        });
+        row.querySelector('[data-act="remove"]').addEventListener("click", async () => {
+          const person = DB.CompanyMembers.forCompany(co.id).find((x) => x.user.id === userId);
+          if (!person) return;
+          const otherUnits = DB.CompanyMembers.accessOf(person.user).filter((a) => a.companyId !== co.id);
+          let res;
+          if (person.access.primary && !otherUnits.length) {
+            if (!UI.confirmDialog(`Revogar a conta de ${person.user.name}? Ela não poderá mais entrar no portal.`)) return;
+            res = await DB.Users.remove(userId);
+          } else if (person.access.primary) {
+            if (!UI.confirmDialog(`Remover ${person.user.name} desta unidade? Ela continua com acesso às outras unidades.`)) return;
+            res = await DB.CompanyMembers.set(userId, co.id, { can_view_tasks: false, can_approve: false, can_view_financial: false, can_view_campaigns: false });
+          } else {
+            if (!UI.confirmDialog(`Remover o acesso de ${person.user.name} a ${co.name}?`)) return;
+            res = await DB.CompanyMembers.remove(userId, co.id);
+          }
+          if (!res.ok) { UI.toast(res.message || "Não foi possível remover.", "error"); return; }
+          UI.toast("Acesso removido.", "success");
+          render();
+        });
+      });
+
+      const showTab = (newTab) => {
+        overlay.querySelector("#ac-new").style.display = newTab ? "" : "none";
+        overlay.querySelector("#ac-link").style.display = newTab ? "none" : "";
+      };
+      overlay.querySelector("#ac-tab-new").addEventListener("click", () => showTab(true));
+      const linkTab = overlay.querySelector("#ac-tab-link");
+      if (linkTab) linkTab.addEventListener("click", () => showTab(false));
+
+      overlay.querySelector("#ac-create").addEventListener("click", async (e) => {
+        const name = overlay.querySelector("#ac-name").value.trim();
+        const email = overlay.querySelector("#ac-email").value.trim();
+        const pass = overlay.querySelector("#ac-pass").value.trim();
+        if (!name || !email || pass.length < 6) { UI.toast("Informe nome, e-mail e uma senha com pelo menos 6 caracteres.", "error"); return; }
+        e.target.disabled = true;
+        const created = await DB.Users.create({
+          name, email, password: pass, role: "company", companyId: co.id, team: null,
+          position: "Representante", avatar: initials(name), status: "offline", permissions: ["boletos:own"], performance: 0
+        });
+        if (!created.ok) { UI.toast(created.message || "Não foi possível criar o acesso.", "error"); e.target.disabled = false; return; }
+        const res = await DB.CompanyMembers.set(created.user.id, co.id, readPerms(overlay.querySelector("#ac-new"), "n"));
+        if (!res.ok) UI.toast(res.message, "error");
+        UI.toast("Acesso criado.", "success");
+        render();
+      });
+
+      const doLink = overlay.querySelector("#ac-do-link");
+      if (doLink) doLink.addEventListener("click", async () => {
+        const userId = overlay.querySelector("#ac-user").value;
+        const res = await DB.CompanyMembers.set(userId, co.id, readPerms(overlay.querySelector("#ac-link"), "l"));
+        if (!res.ok) { UI.toast(res.message, "error"); return; }
+        UI.toast("Pessoa vinculada a esta unidade.", "success");
+        render();
+      });
+    }
+
+    render();
+  }
+
   function openCompanyModal(companyId, onSaved) {
     const co    = companyId ? DB.Companies.get(companyId) : null;
     const isNew = !co;
@@ -1169,9 +1356,16 @@
             </select>
           </div>
         </div>
-        <div class="form-group">
-          <label class="form-label">CNPJ</label>
-          <input type="text" class="form-control" id="cm-cnpj" value="${co ? UI.escapeHtml(co.cnpj || "") : ""}" placeholder="00.000.000/0001-00" />
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Marca / grupo</label>
+            <input type="text" class="form-control" id="cm-brand" list="cm-brand-list" value="${co ? UI.escapeHtml(co.brand || "") : ""}" placeholder="Ex: Panobianco (agrupa as unidades)" />
+            <datalist id="cm-brand-list">${brandsOf(DB.Companies.list()).map((b) => `<option value="${UI.escapeHtml(b)}"></option>`).join("")}</datalist>
+          </div>
+          <div class="form-group">
+            <label class="form-label">CNPJ</label>
+            <input type="text" class="form-control" id="cm-cnpj" value="${co ? UI.escapeHtml(co.cnpj || "") : ""}" placeholder="00.000.000/0001-00" />
+          </div>
         </div>
         <div class="form-row">
           <div class="form-group">
@@ -1239,6 +1433,7 @@
       if (!name) { UI.toast("Informe o nome da empresa.", "error"); return; }
       const payload = {
         name,
+        brand:   overlay.querySelector("#cm-brand").value.trim(),
         cnpj:    overlay.querySelector("#cm-cnpj").value.trim(),
         contact: overlay.querySelector("#cm-contact").value.trim(),
         email:   overlay.querySelector("#cm-email").value.trim(),

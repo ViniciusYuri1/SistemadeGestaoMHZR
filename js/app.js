@@ -31,7 +31,7 @@
     { id: "reports", label: "Relatórios", icon: svgIcon('<polyline points="3,17 9,10 13,14 21,5"/><polyline points="15,5 21,5 21,11"/>'), roles: ["admin"], section: "Gestão" },
     { id: "audit", label: "Auditoria", icon: svgIcon('<circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.5" y1="15.5" x2="20.5" y2="20.5"/>'), roles: ["admin"], section: "Sistema" },
     { id: "settings", label: "Configurações", icon: svgIcon('<circle cx="12" cy="12" r="3.5"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="4.9" y1="4.9" x2="7" y2="7"/><line x1="17" y1="17" x2="19.1" y2="19.1"/><line x1="4.9" y1="19.1" x2="7" y2="17"/><line x1="17" y1="7" x2="19.1" y2="4.9"/>'), roles: ["admin", "employee"], section: "Sistema" },
-    { id: "portal", label: "Meus Boletos", icon: svgIcon('<path d="M6 3h12v18l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3-2 1.3V3z"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="9" y1="12" x2="15" y2="12"/>'), roles: ["company"], section: "Portal" }
+    { id: "portal", label: "Meu Portal", icon: svgIcon('<path d="M6 3h12v18l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3-2 1.3V3z"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="9" y1="12" x2="15" y2="12"/>'), roles: ["company"], section: "Portal" }
   ];
 
   const sidebarNav = document.getElementById("sidebar-nav");

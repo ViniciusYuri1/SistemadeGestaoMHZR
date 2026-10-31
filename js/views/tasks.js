@@ -8,13 +8,7 @@
   "use strict";
   window.Views = window.Views || {};
 
-  const STATUS_LABELS = {
-    backlog: "Backlog",
-    nao_iniciada: "A Fazer",
-    em_andamento: "Em Progresso",
-    em_revisao: "Revisão",
-    concluida: "Concluído"
-  };
+  const STATUS_LABELS = DB.TASK_STATUS_LABELS;
   const PRIORITY_LABELS = { baixa: "Baixa", media: "Média", alta: "Alta", urgente: "Urgente" };
 
   let state = {
@@ -31,6 +25,375 @@
     const list = task.handoffs || [];
     const last = list[list.length - 1];
     return last && last.to === task.assignee ? last : null;
+  }
+
+  const TRACKED_FIELD_LABELS = {
+    title: "título", description: "descrição", priority: "prioridade",
+    startDate: "data de início", dueDate: "prazo", tags: "tags", companyIds: "empresas"
+  };
+
+  function taskEventText(ev) {
+    const d = ev.data || {};
+    const st = (k) => STATUS_LABELS[k] || k || "—";
+    switch (ev.type) {
+      case "created":          return d.duplicatedFrom ? "criou a tarefa (duplicada)" : "criou a tarefa";
+      case "status_changed":   return `mudou o status de <strong>${st(d.from)}</strong> para <strong>${st(d.to)}</strong>`;
+      case "assignee_changed": return `trocou o responsável de <strong>${UI.escapeHtml(userName(d.from))}</strong> para <strong>${UI.escapeHtml(userName(d.to))}</strong>`;
+      case "updated":          return `editou ${(d.fields || []).map((f) => TRACKED_FIELD_LABELS[f] || f).join(", ")}`;
+      case "comment":          return `comentou: “${UI.escapeHtml(d.text || "")}”`;
+      case "forwarded":        return `encaminhou de <strong>${UI.escapeHtml(userName(d.from))}</strong> para <strong>${UI.escapeHtml(userName(d.to))}</strong>${d.note ? `: “${UI.escapeHtml(d.note)}”` : ""}`;
+      case "archived":         return d.auto ? `arquivada automaticamente (concluída há mais de ${d.days || 30} dias)` : "arquivou a tarefa";
+      case "unarchived":       return "desarquivou a tarefa";
+      case "file_uploaded":    return `enviou o arquivo <strong>${UI.escapeHtml(d.name || "")}</strong>`;
+      case "file_version":     return `enviou a versão <strong>v${d.version}</strong> de <strong>${UI.escapeHtml(d.name || "")}</strong>`;
+      case "file_removed":     return `removeu o arquivo <strong>${UI.escapeHtml(d.name || "")}</strong> (v${d.version})`;
+      case "approval_requested": return `enviou para aprovação do cliente: <strong>${UI.escapeHtml((d.files || []).join(", "))}</strong>${d.message ? ` — “${UI.escapeHtml(d.message)}”` : ""}`;
+      case "approval_decided": return (d.decision === "approved" ? "<strong style=\"color:var(--color-success);\">aprovou o material</strong>" : `<strong style="color:var(--color-danger);">pediu ajustes</strong>: “${UI.escapeHtml(d.reason || "")}”`) + (d.onBehalf ? " (registrado em nome do cliente)" : "");
+      case "approval_cancelled": return "retirou o material da aprovação do cliente";
+      default:                 return UI.escapeHtml(ev.type);
+    }
+  }
+
+  function taskEventHtml(ev) {
+    const actor = ev.actor ? DB.Users.get(ev.actor) : null;
+    const who = actor ? `<strong>${UI.escapeHtml(actor.name)}</strong> ` : (ev.actor ? "<strong>Usuário removido</strong> " : "");
+    const text = taskEventText(ev);
+    const sentence = who ? who + text : (ev.type === "created" ? "Tarefa criada" : text.charAt(0).toUpperCase() + text.slice(1));
+    const when = ev.data && ev.data.backfill && ev.type === "created" ? UI.formatDate(ev.created_at.slice(0, 10)) : UI.formatDateTime(ev.created_at);
+    return `
+      <div style="padding:8px 0;border-bottom:1px solid var(--border-color);">
+        <div class="text-sm">${sentence}</div>
+        <div class="text-sm text-muted" style="margin-top:2px;">${when}${ev.visibility === "client" ? " · visível ao cliente" : ""}</div>
+      </div>`;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Arquivos da tarefa (Storage, com versões)                           */
+  /* ------------------------------------------------------------------ */
+
+  function fileIcon(mime) {
+    if (!mime) return "📎";
+    if (mime.indexOf("image/") === 0) return "🖼️";
+    if (mime.indexOf("video/") === 0) return "🎬";
+    if (mime === "application/pdf") return "📄";
+    if (mime.indexOf("audio/") === 0) return "🎵";
+    return "📎";
+  }
+
+  function fileSize(bytes) {
+    if (!bytes && bytes !== 0) return "";
+    if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1).replace(".", ",")} MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+
+  function bindTaskFiles(overlay, task, canEdit) {
+    const box = overlay.querySelector("#tm-files");
+    const statusEl = overlay.querySelector("#tm-file-status");
+    const openVersions = new Set();
+    let groups = [];
+
+    function setStatus(text) {
+      if (statusEl) statusEl.textContent = text;
+    }
+
+    function fileLink(f, urls, label) {
+      const url = urls[f.path];
+      return url
+        ? `<a class="btn btn-ghost btn-sm" href="${UI.escapeHtml(url)}" target="_blank" rel="noopener">${label}</a>`
+        : `<span class="text-sm text-muted">indisponível</span>`;
+    }
+
+    function render(urls) {
+      if (!box.isConnected) return;
+      const visible = groups.filter((g) => g.current);
+      if (!visible.length) {
+        box.innerHTML = `<div class="text-sm text-muted">Nenhum arquivo enviado.</div>`;
+        return;
+      }
+      box.innerHTML = visible.map((g) => {
+        const f = g.current;
+        const uploader = DB.Users.get(f.uploaded_by);
+        const isImage = (f.mime || "").indexOf("image/") === 0 && urls[f.path];
+        const thumb = isImage
+          ? `<img src="${UI.escapeHtml(urls[f.path])}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);flex-shrink:0;" />`
+          : `<div style="width:48px;height:48px;display:flex;align-items:center;justify-content:center;font-size:22px;background:var(--bg-surface-alt);border-radius:8px;flex-shrink:0;">${fileIcon(f.mime)}</div>`;
+        const versionsOpen = openVersions.has(g.id);
+        return `
+          <div style="padding:10px 0;border-bottom:1px solid var(--border-color);">
+            <div class="flex items-center gap-2" style="flex-wrap:wrap;">
+              ${thumb}
+              <div style="flex:1;min-width:160px;">
+                <div class="text-sm" style="font-weight:700;word-break:break-word;">${UI.escapeHtml(f.name)}
+                  <span class="badge badge-em_andamento" style="font-size:10.5px;margin-left:4px;">v${f.version}</span>
+                  ${f.shared_with_client ? `<span class="badge badge-aguardando_aprovacao" style="font-size:10.5px;margin-left:4px;" title="Enviado ao cliente para aprovação">👁 cliente vê</span>` : ""}
+                </div>
+                <div class="text-sm text-muted">${fileSize(f.size)} · ${UI.escapeHtml(uploader ? uploader.name : "—")} · ${UI.formatDateTime(f.created_at)}</div>
+              </div>
+              <div class="flex gap-2" style="flex-wrap:wrap;">
+                ${fileLink(f, urls, "Abrir")}
+                ${g.versions.length > 1 ? `<button type="button" class="btn btn-ghost btn-sm" data-file-versions="${g.id}">Versões (${g.versions.length})</button>` : ""}
+                ${canEdit ? `<label class="btn btn-ghost btn-sm" style="cursor:pointer;" title="Enviar nova versão deste material">⬆️ Nova versão<input type="file" hidden data-file-newversion="${g.id}" /></label>` : ""}
+                ${canEdit ? `<button type="button" class="btn btn-ghost btn-sm" data-file-remove="${f.id}" title="Remover (fica no histórico)">🗑️</button>` : ""}
+              </div>
+            </div>
+            ${versionsOpen ? `
+            <div style="margin:8px 0 0 56px;">
+              ${g.versions.slice().reverse().map((v) => `
+                <div class="flex items-center gap-2 text-sm" style="padding:4px 0;${v.removed_at ? "opacity:.55;" : ""}">
+                  <strong>v${v.version}</strong>
+                  <span style="flex:1;word-break:break-word;">${UI.escapeHtml(v.name)} · ${UI.formatDateTime(v.created_at)}${v.removed_at ? " · removida" : ""}</span>
+                  ${v.removed_at ? "" : fileLink(v, urls, "Abrir")}
+                </div>`).join("")}
+            </div>` : ""}
+          </div>`;
+      }).join("");
+
+      box.querySelectorAll("[data-file-versions]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.fileVersions;
+          if (openVersions.has(id)) openVersions.delete(id); else openVersions.add(id);
+          render(urls);
+        });
+      });
+      box.querySelectorAll("[data-file-newversion]").forEach((input) => {
+        input.addEventListener("change", () => {
+          const g = groups.find((x) => x.id === input.dataset.fileNewversion);
+          if (g && input.files[0]) uploadFiles([input.files[0]], g);
+        });
+      });
+      box.querySelectorAll("[data-file-remove]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const g = groups.find((x) => x.current && x.current.id === btn.dataset.fileRemove);
+          if (!g || !UI.confirmDialog(`Remover "${g.current.name}"? Ele deixa de aparecer, mas continua registrado no histórico.`)) return;
+          const res = await DB.TaskFiles.remove(g.current);
+          if (!res.ok) { UI.toast(res.message, "error"); return; }
+          UI.toast("Arquivo removido.", "success");
+          load();
+        });
+      });
+    }
+
+    function load() {
+      const form = overlay.querySelector("#task-form");
+      if (form) form.dispatchEvent(new CustomEvent("taskfiles-changed"));
+      DB.TaskFiles.list(task.id).then(({ files, unavailable }) => {
+        if (!box.isConnected) return;
+        if (unavailable) {
+          box.innerHTML = `<div class="text-sm text-muted">Envio de arquivos ainda não configurado no banco (migration pendente).</div>`;
+          const input = overlay.querySelector("#tm-file-input");
+          if (input) input.closest("label").style.display = "none";
+          return;
+        }
+        const byGroup = {};
+        files.forEach((f) => { (byGroup[f.group_id] = byGroup[f.group_id] || []).push(f); });
+        groups = Object.keys(byGroup).map((id) => {
+          const versions = byGroup[id].sort((a, b) => a.version - b.version);
+          const active = versions.filter((v) => !v.removed_at);
+          return { id, versions, current: active[active.length - 1] || null };
+        }).sort((a, b) => ((b.current || {}).created_at || "").localeCompare((a.current || {}).created_at || ""));
+        const paths = files.filter((f) => !f.removed_at).map((f) => f.path);
+        DB.TaskFiles.signedUrls(paths).then(render);
+      });
+    }
+
+    async function uploadFiles(fileList, group) {
+      const files = Array.from(fileList);
+      let ok = 0;
+      for (let i = 0; i < files.length; i++) {
+        setStatus(`Enviando "${files[i].name}" (${i + 1}/${files.length})...`);
+        const nextVersion = group ? Math.max(...group.versions.map((v) => v.version)) + 1 : 1;
+        const res = await DB.TaskFiles.upload(task.id, files[i], group ? group.id : null, nextVersion);
+        if (res.ok) ok++;
+        else UI.toast(res.message, "error");
+      }
+      setStatus(`Até ${DB.TaskFiles.MAX_UPLOAD_MB} MB por arquivo.`);
+      if (ok) UI.toast(group ? "Nova versão enviada." : `${ok} arquivo(s) enviado(s).`, "success");
+      load();
+    }
+
+    const input = overlay.querySelector("#tm-file-input");
+    if (input) {
+      input.addEventListener("change", () => {
+        if (input.files.length) uploadFiles(input.files, null);
+        input.value = "";
+      });
+    }
+    load();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Aprovação do cliente (rodadas em task_approvals)                    */
+  /* ------------------------------------------------------------------ */
+
+  const APPROVAL_STATUS = {
+    pending:   { label: "Aguardando o cliente", color: "var(--color-primary)", bg: "var(--color-primary-light)", icon: "⏳" },
+    approved:  { label: "Aprovado",             color: "var(--color-success)", bg: "var(--color-success-light)", icon: "✅" },
+    rejected:  { label: "Ajustes solicitados",  color: "var(--color-danger)",  bg: "var(--color-danger-light)",  icon: "✏️" },
+    cancelled: { label: "Substituído/retirado", color: "var(--text-muted)",    bg: "var(--bg-surface-alt)",      icon: "↩️" }
+  };
+
+  function approvalRoundHtml(r, filesById, open) {
+    const cfg = APPROVAL_STATUS[r.status] || APPROVAL_STATUS.pending;
+    const names = (r.file_ids || []).map((id) => {
+      const f = filesById[id];
+      return f ? `${UI.escapeHtml(f.name)} (v${f.version})` : "arquivo";
+    }).join(", ");
+    const decider = r.decided_by ? DB.Users.get(r.decided_by) : null;
+    return `
+      <div style="padding:10px 12px;margin-bottom:8px;border-radius:var(--radius-md);background:${cfg.bg};border:1px solid ${open ? cfg.color : "transparent"};">
+        <div class="text-sm" style="font-weight:700;color:${cfg.color};">${cfg.icon} ${cfg.label}</div>
+        <div class="text-sm" style="margin-top:4px;">📎 ${names || "—"}</div>
+        ${r.message ? `<div class="text-sm" style="margin-top:4px;white-space:pre-wrap;">💬 ${UI.escapeHtml(r.message)}</div>` : ""}
+        ${r.reason ? `<div class="text-sm" style="margin-top:4px;white-space:pre-wrap;"><strong>Motivo:</strong> ${UI.escapeHtml(r.reason)}</div>` : ""}
+        <div class="text-sm text-muted" style="margin-top:4px;">
+          Enviado por ${UI.escapeHtml(userName(r.requested_by))} em ${UI.formatDateTime(r.requested_at)}
+          ${r.decided_at && r.status !== "cancelled" ? ` · ${r.status === "approved" ? "aprovado" : "respondido"} por ${UI.escapeHtml(decider ? decider.name : "cliente")} em ${UI.formatDateTime(r.decided_at)}${r.on_behalf ? " (registrado pela equipe)" : ""}` : ""}
+        </div>
+      </div>`;
+  }
+
+  function bindTaskApproval(overlay, ctx, task, canRequest, reopen) {
+    const box = overlay.querySelector("#tm-approval");
+    if (!box) return;
+    const canRegister = DB.canManageTasks(ctx.user);
+    const hasCompany = DB.Tasks.companyIdsOf(task).length > 0;
+    let formOpen = false;
+    let rounds = [];
+    let files = [];
+
+    function currentFiles() {
+      const byGroup = {};
+      files.filter((f) => !f.removed_at).forEach((f) => {
+        if (!byGroup[f.group_id] || byGroup[f.group_id].version < f.version) byGroup[f.group_id] = f;
+      });
+      return Object.values(byGroup).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+    }
+
+    function render() {
+      if (!box.isConnected) return;
+      if (DB.TaskApprovals.unavailable()) {
+        box.innerHTML = `<div class="text-sm text-muted">Aprovação ainda não configurada no banco (migration pendente).</div>`;
+        return;
+      }
+      const filesById = files.reduce((m, f) => { m[f.id] = f; return m; }, {});
+      const pending = rounds.find((r) => r.status === "pending");
+      const past = rounds.filter((r) => r !== pending).reverse();
+      const latest = past[0];
+      const available = currentFiles();
+
+      let html = "";
+      if (pending) {
+        html += approvalRoundHtml(pending, filesById, true);
+        if (canRegister) html += `
+          <div class="flex gap-2" style="flex-wrap:wrap;margin:-2px 0 10px;">
+            <span class="text-sm text-muted" style="align-self:center;">Cliente respondeu por outro canal?</span>
+            <button type="button" class="btn btn-ghost btn-sm" id="tm-appr-onbehalf-ok">Registrar aprovação</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="tm-appr-onbehalf-no">Registrar pedido de ajustes</button>
+          </div>`;
+      } else if (latest) {
+        html += approvalRoundHtml(latest, filesById, false);
+      } else {
+        html += `<div class="text-sm text-muted" style="margin-bottom:8px;">Nenhum material enviado ao cliente ainda.</div>`;
+      }
+
+      if (canRequest) {
+        if (!hasCompany) {
+          html += `<div class="text-sm text-muted">Vincule a tarefa a uma empresa para pedir a aprovação do cliente.</div>`;
+        } else if (!formOpen) {
+          html += `<button type="button" class="btn btn-primary btn-sm" id="tm-appr-open">📤 ${pending ? "Reenviar com outros arquivos" : "Solicitar aprovação do cliente"}</button>`;
+        } else if (!available.length) {
+          html += `<div class="text-sm" style="color:var(--color-danger);">Envie o material em "Arquivos e materiais" antes de pedir a aprovação.</div>
+            <button type="button" class="btn btn-ghost btn-sm" id="tm-appr-cancel" style="margin-top:6px;">Fechar</button>`;
+        } else {
+          html += `
+          <div style="padding:12px 14px;background:var(--bg-surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);">
+            <div class="text-sm" style="font-weight:700;margin-bottom:6px;">Quais arquivos o cliente vai avaliar?</div>
+            ${available.map((f) => `
+              <label class="checkbox-row" style="padding:3px 0;cursor:pointer;">
+                <input type="checkbox" class="tm-appr-file" value="${f.id}" checked />
+                ${UI.escapeHtml(f.name)} <span class="text-muted">(v${f.version})</span>
+              </label>`).join("")}
+            <textarea class="form-control" id="tm-appr-msg" rows="2" placeholder="Mensagem para o cliente (opcional)" style="margin-top:8px;"></textarea>
+            <div class="text-sm text-muted" style="margin-top:6px;">Os arquivos marcados ficam visíveis no portal do cliente e a tarefa vai para "Aguardando aprovação".${pending ? " O envio anterior deixa de valer." : ""}</div>
+            <div class="flex gap-2" style="justify-content:flex-end;margin-top:8px;">
+              <button type="button" class="btn btn-ghost btn-sm" id="tm-appr-cancel">Cancelar</button>
+              <button type="button" class="btn btn-primary btn-sm" id="tm-appr-send">Enviar para aprovação</button>
+            </div>
+          </div>`;
+        }
+      }
+
+      const older = past.slice(pending ? 0 : 1);
+      if (older.length) {
+        html += `
+          <details style="margin-top:10px;">
+            <summary class="text-sm" style="cursor:pointer;color:var(--text-muted);">Rodadas anteriores (${older.length})</summary>
+            <div style="margin-top:8px;">${older.map((r) => approvalRoundHtml(r, filesById, false)).join("")}</div>
+          </details>`;
+      }
+      box.innerHTML = html;
+
+      const openBtn = box.querySelector("#tm-appr-open");
+      if (openBtn) openBtn.addEventListener("click", () => { formOpen = true; load(); });
+      const cancelBtn = box.querySelector("#tm-appr-cancel");
+      if (cancelBtn) cancelBtn.addEventListener("click", () => { formOpen = false; render(); });
+      const sendBtn = box.querySelector("#tm-appr-send");
+      if (sendBtn) sendBtn.addEventListener("click", async () => {
+        const ids = Array.from(box.querySelectorAll(".tm-appr-file:checked")).map((cb) => cb.value);
+        if (!ids.length) { UI.toast("Marque ao menos um arquivo.", "error"); return; }
+        sendBtn.disabled = true;
+        sendBtn.textContent = "Enviando...";
+        const res = await DB.TaskApprovals.request(task.id, ids, box.querySelector("#tm-appr-msg").value.trim());
+        if (!res.ok) {
+          UI.toast(res.message, "error");
+          sendBtn.disabled = false;
+          sendBtn.textContent = "Enviar para aprovação";
+          return;
+        }
+        UI.toast("Material enviado para aprovação do cliente.", "success");
+        reopen();
+      });
+
+      const decideOnBehalf = async (decision) => {
+        let reason = null;
+        if (decision === "rejected") {
+          reason = window.prompt("O que o cliente pediu para ajustar?");
+          if (reason === null) return;
+          if (reason.trim().length < 3) { UI.toast("Descreva o ajuste pedido pelo cliente.", "error"); return; }
+        } else if (!UI.confirmDialog("Registrar que o cliente APROVOU este material? A tarefa será concluída.")) {
+          return;
+        }
+        const res = await DB.TaskApprovals.decide(pending.id, task.id, decision, reason);
+        if (!res.ok) { UI.toast(res.message, "error"); return; }
+        UI.toast(decision === "approved" ? "Aprovação registrada. Tarefa concluída." : "Pedido de ajustes registrado.", "success");
+        reopen();
+      };
+      const okBtn = box.querySelector("#tm-appr-onbehalf-ok");
+      if (okBtn) okBtn.addEventListener("click", () => decideOnBehalf("approved"));
+      const noBtn = box.querySelector("#tm-appr-onbehalf-no");
+      if (noBtn) noBtn.addEventListener("click", () => decideOnBehalf("rejected"));
+    }
+
+    function load() {
+      Promise.all([DB.TaskApprovals.list(task.id), DB.TaskFiles.list(task.id)]).then(([r, f]) => {
+        rounds = r;
+        files = f.files;
+        render();
+      });
+    }
+
+    /* Usado pelo seletor de status e pelo Kanban */
+    box.openRequestForm = () => {
+      formOpen = true;
+      load();
+      box.closest(".form-group").scrollIntoView({ block: "start", behavior: "smooth" });
+    };
+    if (canRequest && box.dataset.autoOpen === "1") formOpen = true;
+    /* Arquivo enviado/removido na seção acima → atualiza a lista do formulário */
+    /* (no form, que é recriado a cada modal — o overlay é reaproveitado) */
+    const form = overlay.querySelector("#task-form");
+    if (form) form.addEventListener("taskfiles-changed", () => { if (box.isConnected) load(); });
+    load();
   }
 
   function badge(map, key, extraClass) {
@@ -244,6 +607,11 @@
     container.querySelectorAll("[data-status-id]").forEach((sel) => {
       sel.addEventListener("change", (e) => {
         const newStatus = e.target.value;
+        if (newStatus === "aguardando_aprovacao") {
+          openTaskModal(ctx, sel.dataset.statusId, reRender, { requestApproval: true });
+          reRender();
+          return;
+        }
         DB.Tasks.update(sel.dataset.statusId, { status: newStatus });
         UI.toast(newStatus === "concluida" ? "Tarefa concluída. Será arquivada automaticamente em 30 dias." : "Status atualizado.", "success");
         reRender();
@@ -278,7 +646,14 @@
   /* Modal de criação / edição / detalhes                                */
   /* ------------------------------------------------------------------ */
 
-  function openTaskModal(ctx, taskId, onSaved) {
+  function openTaskModal(ctx, taskId, onSaved, opts) {
+    opts = opts || {};
+    /* Relê a tarefa antes de abrir: o cliente pode ter aprovado ou pedido
+       ajustes enquanto o cache desta tela estava parado. */
+    if (taskId && !opts.fresh) {
+      DB.Tasks.refresh(taskId).then(() => openTaskModal(ctx, taskId, onSaved, Object.assign({}, opts, { fresh: true })));
+      return;
+    }
     const isAdmin = DB.canManageTasks(ctx.user);
     const task = taskId ? DB.Tasks.get(taskId) : null;
     const isNew = !task;
@@ -345,18 +720,13 @@
         .join("");
     }
 
-    function attachmentsHtml() {
+    /* Anexos da versão anterior (só o nome era guardado); ficam visíveis como histórico */
+    function legacyAttachmentsHtml() {
       const attachments = task ? task.attachments || [] : [];
-      if (!attachments.length) return `<div class="text-sm text-muted">Nenhum anexo.</div>`;
-      return attachments
-        .map(
-          (a, idx) => `
-        <div class="flex items-center gap-2" style="margin-bottom:6px;">
-          📎 <span class="text-sm" style="flex:1;">${UI.escapeHtml(a.name)}</span>
-          ${canEditProgress ? `<button type="button" class="btn btn-ghost btn-sm" data-remove-attachment="${idx}">✕</button>` : ""}
-        </div>`
-        )
-        .join("");
+      if (!attachments.length) return "";
+      return `
+        <div class="text-sm text-muted" style="margin-top:10px;">Anexos antigos (apenas o nome foi registrado):</div>
+        ${attachments.map((a) => `<div class="text-sm" style="margin-top:4px;">📎 ${UI.escapeHtml(a.name)}</div>`).join("")}`;
     }
 
     const html = `
@@ -481,13 +851,21 @@
             !isNew
               ? `
           <div class="form-group">
-            <label class="form-label">Anexos</label>
-            <div id="tm-attachments-list">${attachmentsHtml()}</div>
+            <label class="form-label">📎 Arquivos e materiais</label>
+            <div id="tm-files"><div class="text-sm text-muted">Carregando arquivos...</div></div>
             ${canEditProgress ? `
-            <div class="flex gap-2" style="margin-top:8px;">
-              <input type="text" class="form-control" id="tm-attachment-new" placeholder="Nome do arquivo (simulação de upload)..." />
-              <button type="button" class="btn btn-secondary btn-sm" id="tm-attachment-add">Anexar</button>
+            <div class="flex items-center gap-2" style="margin-top:10px;flex-wrap:wrap;">
+              <label class="btn btn-secondary btn-sm" style="cursor:pointer;">⬆️ Enviar arquivos
+                <input type="file" id="tm-file-input" multiple hidden />
+              </label>
+              <span class="text-sm text-muted" id="tm-file-status">Até ${DB.TaskFiles.MAX_UPLOAD_MB} MB por arquivo.</span>
             </div>` : ""}
+            ${legacyAttachmentsHtml()}
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">✅ Aprovação do cliente</label>
+            <div id="tm-approval" data-auto-open="${opts.requestApproval ? "1" : ""}"><div class="text-sm text-muted">Carregando...</div></div>
           </div>
 
           <div class="form-group">
@@ -497,6 +875,11 @@
               <input type="text" class="form-control" id="tm-comment-new" placeholder="Escreva um comentário..." />
               <button type="button" class="btn btn-secondary btn-sm" id="tm-comment-add">Comentar</button>
             </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">📜 Histórico da tarefa</label>
+            <div id="tm-history" style="max-height:220px;overflow-y:auto;"><div class="text-sm text-muted">Carregando histórico...</div></div>
           </div>`
               : ""
           }
@@ -509,6 +892,16 @@
     `;
 
     const overlay = UI.showModal(html, { large: true });
+
+    if (task) {
+      DB.TaskEvents.list(task.id).then((events) => {
+        const box = overlay.querySelector("#tm-history");
+        if (!box || !box.isConnected) return;
+        box.innerHTML = events.length
+          ? events.slice().reverse().map(taskEventHtml).join("")
+          : `<div class="text-sm text-muted">Nenhum registro ainda.</div>`;
+      });
+    }
 
     overlay.querySelectorAll(".tm-company-cb").forEach((cb) => {
       cb.addEventListener("change", () => {
@@ -574,32 +967,30 @@
       });
     }
 
-    const attachmentAddBtn = overlay.querySelector("#tm-attachment-add");
-    if (attachmentAddBtn) {
-      attachmentAddBtn.addEventListener("click", () => {
-        const input = overlay.querySelector("#tm-attachment-new");
-        if (!input.value.trim() || !task) return;
-        const updated = DB.Tasks.get(task.id);
-        updated.attachments.push({ name: input.value.trim(), url: "#" });
-        DB.Tasks.update(task.id, { attachments: updated.attachments });
-        input.value = "";
-        overlay.querySelector("#tm-attachments-list").innerHTML = attachmentsHtml();
-        bindAttachmentRemove();
+    if (task) bindTaskFiles(overlay, task, canEditProgress);
+    if (task) {
+      bindTaskApproval(overlay, ctx, task, canEditProgress, () => {
+        UI.hideModal();
+        if (onSaved) onSaved();
+        openTaskModal(ctx, task.id, onSaved);
       });
+      if (opts.requestApproval) {
+        setTimeout(() => {
+          const sec = overlay.querySelector("#tm-approval");
+          if (sec && sec.isConnected) sec.closest(".form-group").scrollIntoView({ block: "start" });
+        }, 300);
+      }
     }
-    function bindAttachmentRemove() {
-      overlay.querySelectorAll("[data-remove-attachment]").forEach((btn) => {
-        btn.addEventListener("click", (e) => {
-          const idx = Number(e.target.dataset.removeAttachment);
-          const updated = DB.Tasks.get(task.id);
-          updated.attachments.splice(idx, 1);
-          DB.Tasks.update(task.id, { attachments: updated.attachments });
-          overlay.querySelector("#tm-attachments-list").innerHTML = attachmentsHtml();
-          bindAttachmentRemove();
-        });
-      });
-    }
-    bindAttachmentRemove();
+
+    /* "Aguardando aprovação" só pelo botão de solicitar (escolhendo os arquivos) */
+    const statusSel = overlay.querySelector("#tm-status");
+    if (statusSel && task) statusSel.addEventListener("change", () => {
+      if (statusSel.value !== "aguardando_aprovacao" || task.status === "aguardando_aprovacao") return;
+      statusSel.value = task.status;
+      UI.toast("Escolha os arquivos que o cliente vai avaliar e clique em \"Enviar para aprovação\".", "info");
+      const box = overlay.querySelector("#tm-approval");
+      if (box && box.openRequestForm) box.openRequestForm();
+    });
 
     const commentAddBtn = overlay.querySelector("#tm-comment-add");
     if (commentAddBtn) {
@@ -637,7 +1028,11 @@
         return;
       }
 
-      const newStatus = overlay.querySelector("#tm-status").value;
+      let newStatus = overlay.querySelector("#tm-status").value;
+      if (newStatus === "aguardando_aprovacao" && (!task || task.status !== "aguardando_aprovacao")) {
+        newStatus = task ? task.status : "nao_iniciada";
+        if (isNew) UI.toast("Crie a tarefa, envie os arquivos e depois use \"Solicitar aprovação do cliente\".", "info");
+      }
 
       const payload = canEditFull
         ? {

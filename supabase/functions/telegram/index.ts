@@ -1,0 +1,277 @@
+// =============================================================================
+// Edge Function "telegram" — bot do Sistema de Gestão.
+//
+//   POST (Telegram, com o header secreto)  → comandos nos grupos:
+//        /vincular CODIGO, /pendentes, /desvincular, /ajuda
+//   POST ?action=dispatch                  → envia a fila notification_outbox
+//        (chamado pelo banco via pg_net e pelo pg_cron; só envia o que já está
+//        na fila, por isso não precisa de senha)
+//   POST ?action=setup   (admin logado)    → registra o webhook e os comandos
+//   POST ?action=status  (admin logado)    → dados do bot e do webhook
+//
+// Segredo necessário (Edge Functions → Secrets): TELEGRAM_BOT_TOKEN.
+// "Verify JWT" deve ficar DESLIGADO: o Telegram não envia token do Supabase;
+// a função confere o header secreto do Telegram e o login do admin.
+// =============================================================================
+
+import { createClient } from "jsr:@supabase/supabase-js@2";
+
+const BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
+const TG_BASE = (Deno.env.get("TELEGRAM_API_BASE") ?? "https://api.telegram.org").replace(/\/$/, "");
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+const db = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
+}
+
+// deno-lint-ignore no-explicit-any
+type Any = any;
+
+async function tg(method: string, params: Record<string, unknown> = {}): Promise<Any> {
+  try {
+    const res = await fetch(`${TG_BASE}/bot${BOT_TOKEN}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error_code: 0, description: String(e) };
+  }
+}
+
+/* O header secreto do webhook é derivado do token: nenhum segredo extra. */
+async function webhookSecret(): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("sgt-webhook:" + BOT_TOKEN));
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 48);
+}
+
+let botUsername: string | null = null;
+async function getBotUsername(): Promise<string | null> {
+  if (botUsername) return botUsername;
+  const me = await tg("getMe");
+  if (me.ok) botUsername = me.result.username;
+  return botUsername;
+}
+
+function esc(s: string) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function reply(chatId: number, text: string) {
+  return tg("sendMessage", { chat_id: chatId, text, parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+}
+
+const HELP =
+  "🤖 <b>Bot do Sistema de Gestão</b>\n\n" +
+  "/vincular CÓDIGO — liga este grupo a um cliente (o código é gerado no CRM)\n" +
+  "/pendentes — materiais aguardando aprovação\n" +
+  "/desvincular — para de enviar avisos aqui (só administradores do grupo)\n\n" +
+  "Os avisos de aprovação, ajustes e entregas chegam automaticamente neste grupo.";
+
+/* ------------------------------------------------------------------------- */
+/* Webhook                                                                    */
+/* ------------------------------------------------------------------------- */
+
+async function handleUpdate(update: Any) {
+  const member = update.my_chat_member;
+  if (member) {
+    const status = member.new_chat_member?.status;
+    if (status === "left" || status === "kicked") {
+      await db.rpc("telegram_chat_left", { p_chat_id: member.chat.id });
+    } else if ((status === "member" || status === "administrator") &&
+               (member.old_chat_member?.status === "left" || member.old_chat_member?.status === "kicked")) {
+      await reply(member.chat.id, "👋 Olá! Para receber os avisos aqui, peça ao administrador o código no CRM e envie:\n<code>/vincular CÓDIGO</code>");
+    }
+    return;
+  }
+
+  const msg = update.message;
+  if (!msg) return;
+  if (msg.migrate_to_chat_id) {
+    await db.rpc("telegram_chat_migrated", { p_old: msg.chat.id, p_new: msg.migrate_to_chat_id });
+    return;
+  }
+  const text: string = msg.text ?? "";
+  const m = text.match(/^\/([a-z_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
+  if (!m) return;
+  const [, cmdRaw, target, argRaw] = m;
+  if (target) {
+    const me = await getBotUsername();
+    if (me && target.toLowerCase() !== me.toLowerCase()) return; // comando para outro bot
+  }
+  const cmd = cmdRaw.toLowerCase();
+  const arg = (argRaw ?? "").trim();
+  const chat = msg.chat;
+  const isGroup = chat.type === "group" || chat.type === "supergroup";
+
+  if (cmd === "start" || cmd === "ajuda" || cmd === "help") {
+    await reply(chat.id, isGroup ? HELP : HELP + "\n\n<i>Adicione o bot ao grupo do cliente para usar.</i>");
+    return;
+  }
+  if (!isGroup) {
+    await reply(chat.id, "Este bot funciona dentro dos grupos de clientes. Adicione-o a um grupo e use /vincular.");
+    return;
+  }
+
+  if (cmd === "vincular") {
+    if (!arg) {
+      await reply(chat.id, "Envie o código gerado no CRM: <code>/vincular CÓDIGO</code>");
+      return;
+    }
+    const who = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || msg.from?.username || "";
+    const { data, error } = await db.rpc("telegram_link_chat", {
+      p_code: arg.replace(/\s+/g, ""), p_chat_id: chat.id, p_title: chat.title ?? "", p_user: who,
+    });
+    if (error || !data?.ok) {
+      await reply(chat.id, "❌ Código inválido ou expirado. Gere um novo no CRM (vale por 24 horas e uma única vez).");
+      return;
+    }
+    await reply(chat.id, data.kind === "team"
+      ? "✅ Grupo da <b>equipe</b> vinculado. Aqui chegam as decisões dos clientes e o resumo diário de prazos."
+      : `✅ Grupo vinculado a <b>${esc(data.company)}</b>.\nOs materiais para aprovação e as entregas serão avisados aqui.`);
+    return;
+  }
+
+  if (cmd === "pendentes") {
+    const { data } = await db.rpc("telegram_pending_text", { p_chat_id: chat.id });
+    await reply(chat.id, data ?? "Este grupo ainda não está vinculado. Use <code>/vincular CÓDIGO</code>.");
+    return;
+  }
+
+  if (cmd === "desvincular") {
+    const cm = await tg("getChatMember", { chat_id: chat.id, user_id: msg.from?.id });
+    const st = cm.ok ? cm.result.status : "";
+    if (st !== "creator" && st !== "administrator") {
+      await reply(chat.id, "Só administradores do grupo podem desvincular.");
+      return;
+    }
+    await db.rpc("telegram_chat_left", { p_chat_id: chat.id });
+    await reply(chat.id, "🔕 Grupo desvinculado. Nenhum aviso será enviado aqui.");
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Envio da fila                                                              */
+/* ------------------------------------------------------------------------- */
+
+async function dispatch() {
+  let sent = 0, failed = 0, retried = 0;
+  for (let round = 0; round < 4; round++) {
+    const { data: rows, error } = await db.rpc("telegram_claim_outbox", { p_limit: 25 });
+    if (error) return { error: error.message, sent, failed, retried };
+    if (!rows || !rows.length) break;
+    for (const row of rows as Any[]) {
+      const params: Record<string, unknown> = {
+        chat_id: row.chat_id, text: row.text, parse_mode: "HTML", link_preview_options: { is_disabled: true },
+      };
+      if (row.button_url && /^https:\/\//.test(row.button_url)) {
+        params.reply_markup = { inline_keyboard: [[{ text: row.button_text || "Abrir", url: row.button_url }]] };
+      }
+      const res = await tg("sendMessage", params);
+      if (res.ok) {
+        sent++;
+        await db.rpc("telegram_outbox_result", { p_id: row.id, p_ok: true });
+        continue;
+      }
+      const migrateTo = res.parameters?.migrate_to_chat_id;
+      if (migrateTo) await db.rpc("telegram_chat_migrated", { p_old: row.chat_id, p_new: migrateTo });
+      const gone = !migrateTo && (res.error_code === 403 || /chat not found/i.test(res.description ?? ""));
+      const retryAfter = migrateTo ? 1 : res.parameters?.retry_after ?? null;
+      await db.rpc("telegram_outbox_result", {
+        p_id: row.id, p_ok: false, p_error: `${res.error_code ?? ""} ${res.description ?? ""}`.trim(),
+        p_retry_after: retryAfter, p_chat_gone: gone,
+      });
+      if (gone) failed++; else retried++;
+    }
+  }
+  return { sent, failed, retried };
+}
+
+/* ------------------------------------------------------------------------- */
+/* Ações do admin (setup / status)                                            */
+/* ------------------------------------------------------------------------- */
+
+async function requireAdmin(req: Request): Promise<boolean> {
+  const jwt = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!jwt) return false;
+  const { data } = await db.auth.getUser(jwt);
+  if (!data?.user) return false;
+  const { data: prof } = await db.from("profiles").select("role").eq("id", data.user.id).maybeSingle();
+  return prof?.role === "admin";
+}
+
+async function setup(body: Any) {
+  if (!BOT_TOKEN) return { ok: false, message: "Segredo TELEGRAM_BOT_TOKEN não configurado na função." };
+  const me = await tg("getMe");
+  if (!me.ok) return { ok: false, message: "Token do bot inválido: " + (me.description ?? "") };
+  botUsername = me.result.username;
+
+  let webhook: Any = null;
+  const url: string = body?.webhookUrl ?? "";
+  if (/^https:\/\//.test(url)) {
+    webhook = await tg("setWebhook", {
+      url, secret_token: await webhookSecret(), allowed_updates: ["message", "my_chat_member"], max_connections: 10,
+    });
+    if (!webhook.ok) return { ok: false, message: "Falha ao registrar o webhook: " + (webhook.description ?? "") };
+  }
+  const commands = [
+    { command: "vincular", description: "Vincular este grupo a um cliente (código do CRM)" },
+    { command: "pendentes", description: "Materiais aguardando aprovação" },
+    { command: "desvincular", description: "Parar de receber avisos neste grupo" },
+    { command: "ajuda", description: "Como usar o bot" },
+  ];
+  await tg("setMyCommands", { commands, scope: { type: "all_group_chats" } });
+  return { ok: true, username: botUsername, name: me.result.first_name, webhookSet: !!webhook, privacy: !me.result.can_read_all_group_messages };
+}
+
+async function status() {
+  if (!BOT_TOKEN) return { ok: false, message: "Segredo TELEGRAM_BOT_TOKEN não configurado na função." };
+  const me = await tg("getMe");
+  if (!me.ok) return { ok: false, message: "Token do bot inválido: " + (me.description ?? "") };
+  const info = await tg("getWebhookInfo");
+  return {
+    ok: true, username: me.result.username, name: me.result.first_name,
+    webhookUrl: info.result?.url ?? "", pending: info.result?.pending_update_count ?? 0,
+    lastError: info.result?.last_error_message ?? null,
+  };
+}
+
+/* ------------------------------------------------------------------------- */
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method !== "POST") return json({ ok: false }, 405);
+  const action = new URL(req.url).searchParams.get("action");
+
+  if (action === "dispatch") return json(await dispatch());
+
+  if (action === "setup" || action === "status") {
+    if (!(await requireAdmin(req))) return json({ ok: false, message: "Apenas administradores." }, 403);
+    const body = await req.json().catch(() => ({}));
+    return json(action === "setup" ? await setup(body) : await status());
+  }
+
+  // Webhook do Telegram
+  if (!BOT_TOKEN || req.headers.get("x-telegram-bot-api-secret-token") !== (await webhookSecret())) {
+    return json({ ok: false }, 401);
+  }
+  const update = await req.json().catch(() => null);
+  if (update) {
+    try {
+      await handleUpdate(update);
+    } catch (e) {
+      console.error("[telegram] update", e);
+    }
+  }
+  return json({ ok: true }); // sempre 200 para o Telegram não reenviar
+});

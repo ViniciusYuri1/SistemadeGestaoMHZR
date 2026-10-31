@@ -7,13 +7,7 @@
   "use strict";
   window.Views = window.Views || {};
 
-  const STATUS_LABELS = {
-    backlog: "Backlog",
-    nao_iniciada: "A Fazer",
-    em_andamento: "Em Progresso",
-    em_revisao: "Revisão",
-    concluida: "Concluído"
-  };
+  const STATUS_LABELS = DB.TASK_STATUS_LABELS;
   const PRIORITY_COLORS = {
     baixa: "#6a8caf",
     media: "#d9a441",
@@ -64,13 +58,13 @@
     const tasks = scopedTasks(ctx);
     const statuses = Object.keys(STATUS_LABELS);
     const max = Math.max(1, ...statuses.map((s) => tasks.filter((t) => t.status === s).length));
-    const colors = { backlog: "var(--text-muted)", nao_iniciada: "var(--color-accent-soft)", em_andamento: "var(--color-info)", em_revisao: "var(--color-warning)", concluida: "var(--color-success)" };
+    const colors = { backlog: "var(--text-muted)", nao_iniciada: "var(--color-accent-soft)", em_andamento: "var(--color-info)", em_revisao: "var(--color-warning)", aguardando_aprovacao: "var(--color-primary)", ajustes: "var(--color-danger)", concluida: "var(--color-success)" };
 
     return `
       <div class="card">
         <div class="card-header"><h3 class="card-title">Tarefas por status</h3></div>
         <div class="card-pad">
-          <div style="display:flex; align-items:flex-end; gap:20px; height:180px;">
+          <div style="display:flex; align-items:flex-end; gap:10px; height:180px;">
             ${statuses
               .map((s) => {
                 const count = tasks.filter((t) => t.status === s).length;

@@ -15,6 +15,19 @@
   const LEGACY_STORAGE_KEY = "sgt_database_v1"; // usado apenas pela importação
   const THEME_KEY = "sgt_theme";
 
+  /* Ordem = colunas do Kanban. "aguardando_aprovacao" e "ajustes" são do
+     fluxo de aprovação do cliente; "em_revisao" continua sendo revisão interna. */
+  const TASK_STATUSES = [
+    { key: "backlog",              label: "Backlog" },
+    { key: "nao_iniciada",         label: "A Fazer" },
+    { key: "em_andamento",         label: "Em Progresso" },
+    { key: "em_revisao",           label: "Revisão" },
+    { key: "aguardando_aprovacao", label: "Aguardando aprovação" },
+    { key: "ajustes",              label: "Em ajustes" },
+    { key: "concluida",            label: "Concluído" }
+  ];
+  const TASK_STATUS_LABELS = TASK_STATUSES.reduce((m, s) => { m[s.key] = s.label; return m; }, {});
+
   /* ------------------------------------------------------------------ */
   /* Utilidades                                                         */
   /* ------------------------------------------------------------------ */
@@ -117,11 +130,15 @@
   }
 
   /* Envia (upsert) um objeto para uma tabela-documento, em segundo plano */
+  /* Resolve true se gravou; nunca rejeita (o erro já vira toast) */
   function pushRow(table, obj) {
-    sb()
+    return sb()
       .from(table)
       .upsert({ id: obj.id, data: obj })
-      .then(({ error }) => { if (error) syncError(table + "/" + obj.id, error); });
+      .then(({ error }) => {
+        if (error) syncError(table + "/" + obj.id, error);
+        return !error;
+      });
   }
 
   function deleteRow(table, id) {
@@ -183,7 +200,7 @@
 
   async function fetchAll() {
     const s = sb();
-    const [profiles, teams, companies, boletos, costs, tasks, activities, audit, settings] =
+    const [profiles, teams, companies, boletos, costs, tasks, activities, audit, settings, members] =
       await Promise.all([
         s.from("profiles").select("*"),
         s.from("teams").select("id,data"),
@@ -193,7 +210,8 @@
         s.from("tasks").select("id,data"),
         s.from("activities").select("id,data").order("updated_at", { ascending: false }).limit(50),
         s.from("audit_log").select("id,data").order("updated_at", { ascending: false }).limit(1000),
-        s.from("app_settings").select("id,data").eq("id", "main").maybeSingle()
+        s.from("app_settings").select("id,data").eq("id", "main").maybeSingle(),
+        s.from("company_members").select("*")
       ]);
 
     /* "costs" é opcional: se a migration ainda não foi aplicada no projeto,
@@ -202,6 +220,9 @@
     const failed = [profiles, teams, companies, boletos, tasks, activities, audit].find((r) => r.error);
     if (failed) throw failed.error;
     if (costs.error) console.warn("[DB] tabela 'costs' indisponível (migration pendente?):", costs.error.message);
+    if (members.error) console.warn("[DB] tabela 'company_members' indisponível (migration pendente?):", members.error.message);
+    db.membersUnavailable = !!members.error;
+    db.companyMembers = members.error ? [] : (members.data || []);
 
     const rowData = (r) => (r.data || []).map((x) => x.data);
 
@@ -626,6 +647,71 @@
   /* CRUD: Tarefas                                                       */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /* Representantes de clientes × unidades (tabela company_members)      */
+  /* ------------------------------------------------------------------ */
+
+  const MEMBER_PERMS = [
+    { key: "can_view_tasks",     label: "Ver tarefas" },
+    { key: "can_approve",        label: "Aprovar materiais" },
+    { key: "can_view_financial", label: "Financeiro (boletos e contrato)" },
+    { key: "can_view_campaigns", label: "Campanhas" }
+  ];
+  const FULL_ACCESS = { can_view_tasks: true, can_approve: true, can_view_financial: true, can_view_campaigns: true };
+
+  /* Mesma regra de public.my_company_ids(): linhas explícitas + a empresa
+     principal do perfil com acesso total se não houver linha para ela. */
+  function accessOf(user) {
+    if (!user || user.role !== "company") return [];
+    const rows = (db.companyMembers || []).filter((m) => m.user_id === user.id);
+    const list = rows.map((m) => ({
+      companyId: m.company_id,
+      perms: MEMBER_PERMS.reduce((o, p) => { o[p.key] = !!m[p.key]; return o; }, {}),
+      explicit: true
+    }));
+    if (user.companyId && !rows.some((m) => m.company_id === user.companyId)) {
+      list.unshift({ companyId: user.companyId, perms: clone(FULL_ACCESS), explicit: false, primary: true });
+    }
+    list.forEach((a) => { if (a.companyId === user.companyId) a.primary = true; });
+    return list.filter((a) => MEMBER_PERMS.some((p) => a.perms[p.key]));
+  }
+
+  const CompanyMembers = {
+    PERMS: MEMBER_PERMS,
+    unavailable() { return !!db.membersUnavailable; },
+    /* Acessos do usuário de portal (padrão: o logado) */
+    accessOf(user) { return clone(accessOf(user || currentUser)); },
+    /* Pessoas com acesso a uma unidade (só admin enxerga todas as linhas) */
+    forCompany(companyId) {
+      return db.users
+        .filter((u) => u.role === "company")
+        .map((u) => ({ user: clone(u), access: accessOf(u).find((a) => a.companyId === companyId) }))
+        .filter((x) => x.access);
+    },
+    async set(userId, companyId, perms) {
+      const row = Object.assign({ user_id: userId, company_id: companyId, can_view_tasks: true }, perms);
+      MEMBER_PERMS.forEach((p) => { row[p.key] = !!row[p.key]; });
+      const { error } = await sb().from("company_members").upsert(row, { onConflict: "user_id,company_id" });
+      if (error) return { ok: false, message: isMissingTable(error) ? "Migration de representantes pendente." : friendlyError(error) };
+      const i = db.companyMembers.findIndex((m) => m.user_id === userId && m.company_id === companyId);
+      if (i >= 0) Object.assign(db.companyMembers[i], row); else db.companyMembers.push(row);
+      const u = db.users.find((x) => x.id === userId);
+      const co = (db.companies || []).find((c) => c.id === companyId);
+      addAuditLog({ action: "Edição", type: "Acesso de cliente", targetId: userId, targetName: u ? u.name : userId, companyId, companyName: co ? co.name : "",
+        details: MEMBER_PERMS.filter((p) => row[p.key]).map((p) => p.label).join(", ") || "sem permissões" });
+      return { ok: true };
+    },
+    async remove(userId, companyId) {
+      const { error } = await sb().from("company_members").delete().eq("user_id", userId).eq("company_id", companyId);
+      if (error) return { ok: false, message: friendlyError(error) };
+      db.companyMembers = db.companyMembers.filter((m) => !(m.user_id === userId && m.company_id === companyId));
+      const u = db.users.find((x) => x.id === userId);
+      const co = (db.companies || []).find((c) => c.id === companyId);
+      addAuditLog({ action: "Exclusão", type: "Acesso de cliente", targetId: userId, targetName: u ? u.name : userId, companyId, companyName: co ? co.name : "" });
+      return { ok: true };
+    }
+  };
+
   /* Tarefas antigas (antes da migration 20260930) guardavam um único companyId */
   function taskCompanyIds(task) {
     if (!task) return [];
@@ -651,9 +737,314 @@
     return data;
   }
 
+  /* ---- Histórico permanente (tabela task_events, só inserção) ---- */
+
+  /* Sem a migration 20261031120000 a tabela não existe: o sistema segue
+     funcionando, só não registra histórico. */
+  let taskEventsUnavailable = false;
+  function isMissingTable(error) {
+    const msg = (error && error.message) || "";
+    return !!error && (error.code === "42P01" || error.code === "PGRST205" ||
+      msg.indexOf("does not exist") !== -1 || msg.indexOf("Could not find the table") !== -1);
+  }
+
+  /* Encadeado depois da gravação da tarefa: a RLS de task_events exige
+     que a tarefa já exista. */
+  function logTaskEvent(afterSave, taskId, type, data, visibility) {
+    if (taskEventsUnavailable || !currentUser || currentUser.role === "company") return;
+    Promise.resolve(afterSave).then((saved) => {
+      if (saved === false || taskEventsUnavailable) return;
+      return sb()
+        .from("task_events")
+        .insert({ task_id: taskId, type, visibility: visibility || "internal", data: data || {} })
+        .then(({ error }) => {
+          if (!error) return;
+          if (isMissingTable(error)) {
+            taskEventsUnavailable = true;
+            console.warn("[DB] tabela 'task_events' indisponível (migration pendente?):", error.message);
+            return;
+          }
+          syncError("task_events/" + taskId, error);
+        });
+    });
+  }
+
+  /* ---- Arquivos reais das tarefas (Storage "task-files" + tabela task_files) ---- */
+
+  const TASK_FILES_BUCKET = "task-files";
+  const MAX_UPLOAD_MB = 50; // limite por arquivo do plano gratuito do Supabase
+
+  function randomUUID() {
+    if (global.crypto && global.crypto.randomUUID) return global.crypto.randomUUID();
+    return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+      (c ^ (Math.random() * 16) >> (c / 4)).toString(16));
+  }
+
+  function safeFileName(name) {
+    const clean = String(name || "arquivo")
+      .normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .replace(/[^A-Za-z0-9._-]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return (clean || "arquivo").slice(-120);
+  }
+
+  function friendlyStorageError(error) {
+    const msg = (error && (error.message || error.error)) || "";
+    if (/exceeded the maximum allowed size|Payload too large|413/i.test(msg)) return `Arquivo maior que o limite permitido (${MAX_UPLOAD_MB} MB).`;
+    if (/Bucket not found/i.test(msg) || isMissingTable(error)) return "Armazenamento de arquivos ainda não configurado (migration pendente).";
+    if (/row-level security|Unauthorized|403/i.test(msg)) return "Sem permissão para enviar arquivos nesta tarefa.";
+    return msg || "Falha ao enviar o arquivo.";
+  }
+
+  const TaskFiles = {
+    MAX_UPLOAD_MB,
+    /* Todos os arquivos visíveis da tarefa (inclui versões antigas e removidos) */
+    list(taskId) {
+      return sb()
+        .from("task_files")
+        .select("*")
+        .eq("task_id", taskId)
+        .order("created_at", { ascending: true })
+        .then(({ data, error }) => {
+          if (error) {
+            if (!isMissingTable(error)) console.error("[DB] task_files", error);
+            return { files: [], unavailable: isMissingTable(error) };
+          }
+          return { files: data || [], unavailable: false };
+        });
+    },
+    /* Envia um arquivo; com groupId vira nova versão desse material */
+    async upload(taskId, file, groupId, nextVersion) {
+      if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+        return { ok: false, message: `"${file.name}" tem ${(file.size / 1048576).toFixed(1)} MB; o limite é ${MAX_UPLOAD_MB} MB.` };
+      }
+      const id = randomUUID();
+      const path = `${taskId}/${id}-${safeFileName(file.name)}`;
+      const up = await sb().storage.from(TASK_FILES_BUCKET).upload(path, file, {
+        contentType: file.type || "application/octet-stream",
+        upsert: false
+      });
+      if (up.error) return { ok: false, message: friendlyStorageError(up.error) };
+
+      const row = {
+        id,
+        task_id: taskId,
+        group_id: groupId || randomUUID(),
+        version: groupId ? nextVersion : 1,
+        name: file.name,
+        path,
+        mime: file.type || null,
+        size: file.size
+      };
+      const { error } = await sb().from("task_files").insert(row);
+      if (error) return { ok: false, message: friendlyStorageError(error) };
+
+      logTaskEvent(true, taskId, groupId ? "file_version" : "file_uploaded", { fileId: id, groupId: row.group_id, name: file.name, version: row.version });
+      return { ok: true, file: row };
+    },
+    async remove(file) {
+      const { error } = await sb()
+        .from("task_files")
+        .update({ removed_at: new Date().toISOString(), removed_by: currentUser && currentUser.id })
+        .eq("id", file.id);
+      if (error) return { ok: false, message: friendlyStorageError(error) };
+      logTaskEvent(true, file.task_id, "file_removed", { fileId: file.id, groupId: file.group_id, name: file.name, version: file.version });
+      return { ok: true };
+    },
+    /* URLs temporárias (1 h) para abrir/pré-visualizar arquivos privados */
+    signedUrls(paths) {
+      if (!paths.length) return Promise.resolve({});
+      return sb().storage.from(TASK_FILES_BUCKET).createSignedUrls(paths, 3600).then(({ data, error }) => {
+        if (error) { console.error("[DB] signed urls", error); return {}; }
+        return (data || []).reduce((m, x) => { if (x.signedUrl) m[x.path] = x.signedUrl; return m; }, {});
+      });
+    }
+  };
+
+  const TRACKED_TASK_FIELDS = {
+    title: "título", description: "descrição", priority: "prioridade",
+    startDate: "data de início", dueDate: "prazo", tags: "tags", companyIds: "empresas"
+  };
+
+  const TaskEvents = {
+    list(taskId) {
+      if (taskEventsUnavailable) return Promise.resolve([]);
+      return sb()
+        .from("task_events")
+        .select("id,task_id,created_at,actor,type,visibility,data")
+        .eq("task_id", taskId)
+        .order("created_at", { ascending: true })
+        .then(({ data, error }) => {
+          if (error) {
+            if (isMissingTable(error)) taskEventsUnavailable = true;
+            else console.error("[DB] task_events", error);
+            return [];
+          }
+          return data || [];
+        });
+    }
+  };
+
+  /* ---- Aprovação de materiais (tabela task_approvals + RPCs) ---- */
+
+  function isMissingFunction(error) {
+    const msg = (error && error.message) || "";
+    return !!error && (error.code === "PGRST202" || error.code === "42883" || msg.indexOf("Could not find the function") !== -1);
+  }
+
+  let approvalsUnavailable = false;
+
+  const TaskApprovals = {
+    unavailable() { return approvalsUnavailable; },
+    /* Rodadas da tarefa, da mais antiga para a mais recente */
+    list(taskId) {
+      if (approvalsUnavailable) return Promise.resolve([]);
+      return sb()
+        .from("task_approvals")
+        .select("*")
+        .eq("task_id", taskId)
+        .order("requested_at", { ascending: true })
+        .then(({ data, error }) => {
+          if (error) {
+            if (isMissingTable(error)) approvalsUnavailable = true;
+            else console.error("[DB] task_approvals", error);
+            return [];
+          }
+          return data || [];
+        });
+    },
+    /* Rodadas abertas visíveis ao usuário (portal: "aguardando sua aprovação") */
+    pending() {
+      if (approvalsUnavailable) return Promise.resolve([]);
+      return sb()
+        .from("task_approvals")
+        .select("*")
+        .eq("status", "pending")
+        .then(({ data, error }) => {
+          if (error) {
+            if (isMissingTable(error)) approvalsUnavailable = true;
+            return [];
+          }
+          return data || [];
+        });
+    },
+    async request(taskId, fileIds, message) {
+      const { error } = await sb().rpc("request_task_approval", { p_task_id: taskId, p_file_ids: fileIds, p_message: message || null });
+      if (error) {
+        if (isMissingFunction(error)) return { ok: false, message: "Aprovação ainda não configurada no banco (migration pendente)." };
+        if (isRlsError(error)) syncError("request_task_approval", error);
+        return { ok: false, message: friendlyError(error) };
+      }
+      await Tasks.refresh(taskId);
+      const task = db.tasks.find((t) => t.id === taskId);
+      addAuditLog(Object.assign({ action: "Aprovação", type: "Tarefa", targetId: taskId, targetName: task ? task.title : taskId, details: "Material enviado para aprovação do cliente" }, taskAuditCompany(task)));
+      return { ok: true };
+    },
+    async decide(approvalId, taskId, decision, reason) {
+      const { data, error } = await sb().rpc("decide_task_approval", { p_approval_id: approvalId, p_decision: decision, p_reason: reason || null });
+      if (error) {
+        if (isMissingFunction(error)) return { ok: false, message: "Aprovação ainda não configurada no banco (migration pendente)." };
+        return { ok: false, message: friendlyError(error) };
+      }
+      await Tasks.refresh(taskId);
+      return { ok: true, status: data };
+    }
+  };
+
+  /* ---- Telegram (grupos vinculados, fila de avisos e a Edge Function) ---- */
+
+  const Telegram = {
+    /* Endereço das funções visto pelo navegador */
+    functionsUrl() {
+      return ((global.SUPABASE_CONFIG && global.SUPABASE_CONFIG.url) || "").replace(/\/$/, "") + "/functions/v1";
+    },
+    /* Visto pelo banco (pg_net). No Docker local o banco alcança o gateway como "kong". */
+    dbFunctionsUrl() {
+      return global.SUPABASE_ENV === "local" ? "http://kong:8000/functions/v1" : Telegram.functionsUrl();
+    },
+    async config() {
+      const { data, error } = await sb().rpc("get_telegram_config");
+      if (error) return { ok: false, unavailable: isMissingFunction(error), message: friendlyError(error) };
+      return { ok: true, config: data || {} };
+    },
+    async saveConfig(appUrl, botUsername) {
+      const { error } = await sb().rpc("set_telegram_config", {
+        p_functions_url: Telegram.dbFunctionsUrl(), p_app_url: appUrl || null, p_bot_username: botUsername || null
+      });
+      return error ? { ok: false, message: friendlyError(error) } : { ok: true };
+    },
+    /* Ações de admin na Edge Function: setup | status */
+    async call(action, body) {
+      try {
+        const { data } = await sb().auth.getSession();
+        const token = data && data.session && data.session.access_token;
+        const res = await fetch(`${Telegram.functionsUrl()}/telegram?action=${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body || {})
+        });
+        const json = await res.json().catch(() => ({}));
+        if (res.status === 404) return { ok: false, message: "A função \"telegram\" ainda não foi publicada no Supabase." };
+        return Object.assign({ ok: res.ok }, json);
+      } catch (e) {
+        return { ok: false, message: "Não foi possível falar com a função \"telegram\" (ela já foi publicada?)." };
+      }
+    },
+    /* companyId null = grupos da equipe */
+    chats(companyId) {
+      let q = sb().from("telegram_chats").select("*").eq("active", true).order("linked_at", { ascending: true });
+      q = companyId ? q.eq("company_id", companyId) : q.eq("kind", "team");
+      return q.then(({ data, error }) => {
+        if (error) return { chats: [], unavailable: isMissingTable(error) };
+        return { chats: data || [], unavailable: false };
+      });
+    },
+    allChats() {
+      return sb().from("telegram_chats").select("id,company_id,kind").eq("active", true)
+        .then(({ data, error }) => (error ? [] : data || []));
+    },
+    async createCode(companyId) {
+      const { data, error } = await sb().rpc("create_telegram_link_code", { p_company_id: companyId || null });
+      if (error) return { ok: false, message: isMissingFunction(error) ? "Integração com o Telegram ainda não configurada no banco (migration pendente)." : friendlyError(error) };
+      addAuditLog({ action: "Telegram", type: "Integração", targetId: companyId || "team", targetName: companyId ? ((db.companies.find((c) => c.id === companyId) || {}).name || companyId) : "Grupo da equipe", details: "Código de vinculação gerado" });
+      return { ok: true, code: data };
+    },
+    async unlink(chat) {
+      const { error } = await sb().rpc("telegram_admin_unlink", { p_id: chat.id });
+      if (error) return { ok: false, message: friendlyError(error) };
+      addAuditLog({ action: "Telegram", type: "Integração", targetId: String(chat.chat_id), targetName: chat.title || "Grupo", details: "Grupo desvinculado" });
+      return { ok: true };
+    },
+    outbox(limit) {
+      return sb().from("notification_outbox").select("id,chat_id,kind,text,status,attempts,last_error,created_at,sent_at")
+        .order("id", { ascending: false }).limit(limit || 20)
+        .then(({ data, error }) => (error ? [] : data || []));
+    }
+  };
+
   const Tasks = {
     companyIdsOf: taskCompanyIds,
     companyNamesOf: taskCompanyNames,
+    /* Relê uma tarefa do servidor (o cliente pode ter decidido uma aprovação
+       enquanto esta tela estava aberta). Resolve com a tarefa ou null. */
+    refresh(id) {
+      return sb()
+        .from("tasks")
+        .select("id,data")
+        .eq("id", id)
+        .maybeSingle()
+        .then(({ data, error }) => {
+          if (error) { console.warn("[DB] refresh task", error.message); return Tasks.get(id); }
+          const idx = db.tasks.findIndex((t) => t.id === id);
+          if (!data) {
+            if (idx !== -1) db.tasks.splice(idx, 1);
+            return null;
+          }
+          if (idx === -1) db.tasks.push(data.data); else db.tasks[idx] = data.data;
+          return clone(data.data);
+        })
+        .catch(() => Tasks.get(id));
+    },
     list(filter) {
       let list = clone(db.tasks);
       if (filter) {
@@ -685,7 +1076,7 @@
       /* RLS só devolve a linha ao criador se ele estiver em participants (upsert relê a linha) */
       task.participants = uniq([currentUser && currentUser.id, task.assignee]);
       db.tasks.push(task);
-      pushRow("tasks", task);
+      logTaskEvent(pushRow("tasks", task), task.id, "created", { title: task.title, assignee: task.assignee, status: task.status }, "client");
       logActivity(currentUser && currentUser.id, `criou a tarefa "${task.title}"`);
       addAuditLog(Object.assign({ action: "Criação", type: "Tarefa", targetId: task.id, targetName: task.title }, taskAuditCompany(task)));
       return clone(task);
@@ -704,10 +1095,22 @@
         }
       }
 
+      const before = clone(task);
+      before.companyIds = taskCompanyIds(before);
       Object.assign(task, patch, { updatedAt: todayISO() });
       normalizeTaskCompanies(task);
       task.participants = uniq((task.participants || []).concat([currentUser && currentUser.id, task.assignee]));
-      pushRow("tasks", task);
+      const saved = pushRow("tasks", task);
+      if (before.status !== task.status) {
+        logTaskEvent(saved, id, "status_changed", { from: before.status, to: task.status }, "client");
+      }
+      if (before.assignee !== task.assignee) {
+        logTaskEvent(saved, id, "assignee_changed", { from: before.assignee, to: task.assignee });
+      }
+      const changed = Object.keys(TRACKED_TASK_FIELDS).filter((f) =>
+        f in patch && JSON.stringify(before[f] === undefined ? null : before[f]) !== JSON.stringify(task[f] === undefined ? null : task[f])
+      );
+      if (changed.length) logTaskEvent(saved, id, "updated", { fields: changed });
       addAuditLog(Object.assign({ action: "Edição", type: "Tarefa", targetId: id, targetName: task.title }, taskAuditCompany(task)));
       return clone(task);
     },
@@ -734,7 +1137,7 @@
       copy.createdAt = todayISO();
       copy.updatedAt = todayISO();
       db.tasks.push(copy);
-      pushRow("tasks", copy);
+      logTaskEvent(pushRow("tasks", copy), copy.id, "created", { title: copy.title, assignee: copy.assignee, status: copy.status, duplicatedFrom: original.id }, "client");
       addAuditLog({ action: "Criação", type: "Tarefa", targetId: copy.id, targetName: copy.title, details: `Duplicada de: ${original.title}` });
       return clone(copy);
     },
@@ -742,7 +1145,7 @@
       const task = db.tasks.find((t) => t.id === id);
       if (!task) return null;
       task.archived = archived !== false;
-      pushRow("tasks", task);
+      logTaskEvent(pushRow("tasks", task), id, task.archived ? "archived" : "unarchived", {});
       addAuditLog({ action: "Edição", type: "Tarefa", targetId: id, targetName: task.title, details: archived !== false ? "Arquivada" : "Desarquivada" });
       return clone(task);
     },
@@ -750,7 +1153,7 @@
       const task = db.tasks.find((t) => t.id === id);
       if (!task) return null;
       task.comments.push({ id: uid("cmt"), author, text, date: new Date().toISOString() });
-      pushRow("tasks", task);
+      logTaskEvent(pushRow("tasks", task), id, "comment", { text });
       return clone(task);
     },
     /* Arquiva concluídas há mais de ARCHIVE_AFTER_DAYS. Tarefas concluídas antes
@@ -763,7 +1166,7 @@
       );
       old.forEach((t) => {
         t.archived = true;
-        pushRow("tasks", t);
+        logTaskEvent(pushRow("tasks", t), t.id, "archived", { auto: true, days: ARCHIVE_AFTER_DAYS });
       });
       if (old.length) {
         addAuditLog({ action: "Edição", type: "Tarefa", targetId: "auto-archive", targetName: `${old.length} tarefa(s)`, details: `Arquivadas automaticamente (concluídas há mais de ${ARCHIVE_AFTER_DAYS} dias)` });
@@ -796,7 +1199,7 @@
         updatedAt: todayISO()
       });
       task.participants = uniq((task.participants || []).concat([currentUser && currentUser.id, fromUserId, toUserId]));
-      pushRow("tasks", task);
+      logTaskEvent(pushRow("tasks", task), id, "forwarded", { from: fromUserId, to: toUserId, note: note || "" });
       const fromName = (db.users.find((u) => u.id === fromUserId) || {}).name || "—";
       const toName = (db.users.find((u) => u.id === toUserId) || {}).name || "—";
       logActivity(currentUser && currentUser.id, `encaminhou a tarefa "${task.title}" para ${toName}`);
@@ -934,7 +1337,7 @@
       return { total, concluded, inProgress, overdue, activeUsers, productivity };
     },
     tasksByStatus() {
-      const statuses = ["backlog", "nao_iniciada", "em_andamento", "em_revisao", "concluida"];
+      const statuses = TASK_STATUSES.map((s) => s.key);
       const tasks = db.tasks;
       return statuses.map((s) => ({
         status: s,
@@ -1231,6 +1634,13 @@
     canManageTasks,
     canSeeAllTasks,
     requireSession,
+    TASK_STATUSES,
+    TASK_STATUS_LABELS,
+    TaskEvents,
+    TaskFiles,
+    TaskApprovals,
+    Telegram,
+    CompanyMembers,
     Users,
     Teams,
     Companies,
