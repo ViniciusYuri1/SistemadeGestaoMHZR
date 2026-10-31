@@ -199,7 +199,8 @@ begin
          reason = v_reason, on_behalf = v_staff
    where id = p_approval_id;
 
-  v_status := case when p_decision = 'approved' then 'concluida' else 'ajustes' end;
+  -- Aprovado vai para "aprovada" (a equipe ainda finaliza/publica e conclui).
+  v_status := case when p_decision = 'approved' then 'aprovada' else 'ajustes' end;
   v_from := v_task.data ->> 'status';
   update public.tasks
      set data = public.task_data_with_status(data, v_status)

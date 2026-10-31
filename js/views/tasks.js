@@ -360,12 +360,12 @@
           reason = window.prompt("O que o cliente pediu para ajustar?");
           if (reason === null) return;
           if (reason.trim().length < 3) { UI.toast("Descreva o ajuste pedido pelo cliente.", "error"); return; }
-        } else if (!UI.confirmDialog("Registrar que o cliente APROVOU este material? A tarefa será concluída.")) {
+        } else if (!UI.confirmDialog("Registrar que o cliente APROVOU este material? A tarefa irá para \"Aprovada\".")) {
           return;
         }
         const res = await DB.TaskApprovals.decide(pending.id, task.id, decision, reason);
         if (!res.ok) { UI.toast(res.message, "error"); return; }
-        UI.toast(decision === "approved" ? "Aprovação registrada. Tarefa concluída." : "Pedido de ajustes registrado.", "success");
+        UI.toast(decision === "approved" ? "Aprovação registrada. Tarefa em \"Aprovada\"." : "Pedido de ajustes registrado.", "success");
         reopen();
       };
       const okBtn = box.querySelector("#tm-appr-onbehalf-ok");

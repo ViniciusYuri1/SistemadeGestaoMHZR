@@ -16,7 +16,8 @@
   const THEME_KEY = "sgt_theme";
 
   /* Ordem = colunas do Kanban. "aguardando_aprovacao" e "ajustes" são do
-     fluxo de aprovação do cliente; "em_revisao" continua sendo revisão interna. */
+     fluxo de aprovação do cliente ("aprovada" = cliente aprovou, falta a equipe
+     finalizar/publicar); "em_revisao" continua sendo revisão interna. */
   const TASK_STATUSES = [
     { key: "backlog",              label: "Backlog" },
     { key: "nao_iniciada",         label: "A Fazer" },
@@ -24,6 +25,7 @@
     { key: "em_revisao",           label: "Revisão" },
     { key: "aguardando_aprovacao", label: "Aguardando aprovação" },
     { key: "ajustes",              label: "Em ajustes" },
+    { key: "aprovada",             label: "Aprovada" },
     { key: "concluida",            label: "Concluído" }
   ];
   const TASK_STATUS_LABELS = TASK_STATUSES.reduce((m, s) => { m[s.key] = s.label; return m; }, {});

@@ -52,6 +52,7 @@
     em_revisao:   { label: "Revisão",      badge: "badge-em_revisao",   step: 3 },
     aguardando_aprovacao: { label: "Aguardando sua aprovação", badge: "badge-aguardando_aprovacao", step: 3 },
     ajustes:      { label: "Em ajustes",   badge: "badge-ajustes",      step: 2 },
+    aprovada:     { label: "Aprovado",     badge: "badge-aprovada",     step: 4 },
     concluida:    { label: "Concluído",    badge: "badge-concluida",    step: 4 }
   };
   const PRIORITY_TASK = { baixa: "Baixa", media: "Média", alta: "Alta", urgente: "Urgente" };
@@ -70,7 +71,7 @@
     { label: "Na fila",          statuses: ["backlog", "nao_iniciada"] },
     { label: "Em produção",      statuses: ["em_andamento", "em_revisao", "ajustes"] },
     { label: "Aguardando você",  statuses: ["aguardando_aprovacao"] },
-    { label: "Concluído",        statuses: ["concluida"] }
+    { label: "Aprovado / concluído", statuses: ["aprovada", "concluida"] }
   ];
   const WEEKDAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
   const MONTHS_FULL = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
@@ -87,7 +88,7 @@
             <div class="kanban-cards">
               ${list.map((t) => {
                 const st = STATUS_TASK[t.status] || STATUS_TASK.nao_iniciada;
-                const overdue = t.status !== "concluida" && t.dueDate < today;
+                const overdue = t.status !== "concluida" && t.status !== "aprovada" && t.dueDate < today;
                 return `
                 <div class="kanban-card" data-portal-task="${t.id}" style="cursor:pointer;">
                   <div class="kc-title-row"><span class="kc-title">${UI.escapeHtml(t.title)}</span></div>
@@ -127,7 +128,7 @@
             <div class="calendar-day-cell ${iso === today ? "today" : ""}">
               <div class="day-number">${Number(iso.slice(8))}</div>
               ${list.map((t) => {
-                const cls = t.status === "concluida" ? "done" : t.dueDate < today ? "overdue" : "";
+                const cls = t.status === "concluida" || t.status === "aprovada" ? "done" : t.dueDate < today ? "overdue" : "";
                 return `<div class="cal-event-pill ${cls}" data-portal-task="${t.id}" title="${UI.escapeHtml(t.title)}" style="cursor:pointer;">${t.status === "aguardando_aprovacao" ? "⏳ " : ""}${UI.escapeHtml(t.title)}</div>`;
               }).join("")}
             </div>`;
@@ -609,7 +610,7 @@
       const cards = tasks.map((t) => {
         const st      = STATUS_TASK[t.status] || STATUS_TASK.nao_iniciada;
         const step    = st.step;
-        const overdue = t.status !== "concluida" && t.dueDate < today;
+        const overdue = t.status !== "concluida" && t.status !== "aprovada" && t.dueDate < today;
         const done    = (t.checklist || []).filter((c) => c.done).length;
         const total   = (t.checklist || []).length;
         const pct     = total ? Math.round((done / total) * 100) : 0;

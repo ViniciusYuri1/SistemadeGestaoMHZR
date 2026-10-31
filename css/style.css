@@ -270,6 +270,7 @@ textarea.form-control { resize: vertical; min-height: 80px; }
 .badge-em_revisao { background: var(--color-warning-light); color: var(--color-warning); }
 .badge-aguardando_aprovacao { background: var(--color-primary-light); color: var(--color-primary); }
 .badge-ajustes { background: var(--color-danger-light); color: var(--color-danger); }
+.badge-aprovada { background: var(--color-success-light); color: var(--color-success); box-shadow: inset 0 0 0 1px var(--color-success); }
 .badge-concluida { background: var(--color-success-light); color: var(--color-success); }
 .badge-atrasada { background: var(--color-danger-light); color: var(--color-danger); }
 

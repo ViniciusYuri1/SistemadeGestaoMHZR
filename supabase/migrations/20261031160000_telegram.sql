@@ -273,7 +273,7 @@ begin
     join public.tasks t on t.id = a.task_id
    where a.status = 'pending'
      and (v_chat.kind = 'team' or v_chat.company_id = any (public.task_company_ids(t.data)));
-  return coalesce('⏳ <b>Aguardando aprovação</b>' || E'\n' || v_lines, '✅ Nenhum material aguardando aprovação.');
+  return coalesce('<b>Materiais aguardando aprovação</b>' || E'\n' || v_lines, 'No momento, não há materiais aguardando aprovação.');
 end;
 $$;
 
@@ -401,28 +401,28 @@ begin
 
   if new.type = 'approval_requested' then
     perform public.telegram_enqueue('approval_requested', new.task_id, v_cos, true, false,
-      '📝 <b>Novo material para aprovação</b>' || E'\n' || '<b>' || v_title || '</b>'
+      '<b>Novo material disponível para aprovação</b>' || E'\n' || '<b>' || v_title || '</b>'
       || case when jsonb_typeof(d -> 'files') = 'array' and jsonb_array_length(d -> 'files') > 0
-              then E'\n📎 ' || public.tg_esc(array_to_string(array(select jsonb_array_elements_text(d -> 'files')), ', ')) else '' end
-      || case when coalesce(d ->> 'message', '') <> '' then E'\n💬 ' || public.tg_esc(d ->> 'message') else '' end
-      || E'\n\nAbra o portal para ver o material e aprovar ou pedir ajustes.',
-      'Ver e aprovar', '/app.html#/portal');
+              then E'\nArquivos: ' || public.tg_esc(array_to_string(array(select jsonb_array_elements_text(d -> 'files')), ', ')) else '' end
+      || case when coalesce(d ->> 'message', '') <> '' then E'\nMensagem da equipe: ' || public.tg_esc(d ->> 'message') else '' end
+      || E'\n\nPor gentileza, acesse o portal para visualizar o material e registrar sua aprovação ou solicitação de ajustes.',
+      'Visualizar e aprovar', '/app.html#/portal');
 
   elsif new.type = 'approval_decided' then
     if d ->> 'decision' = 'approved' then
       perform public.telegram_enqueue('approval_decided', new.task_id, v_cos, true, false,
-        '✅ <b>Material aprovado</b>' || E'\n' || v_title
-        || case when (d ->> 'onBehalf')::boolean then E'\nAprovação registrada pela equipe.' else E'\nAprovado por ' || coalesce(v_actor, 'cliente') || '. Obrigado!' end,
-        'Abrir portal', '/app.html#/portal');
+        '<b>Aprovação registrada</b>' || E'\n' || v_title
+        || case when (d ->> 'onBehalf')::boolean then E'\nA aprovação foi registrada por nossa equipe.' else E'\nAprovado por ' || coalesce(v_actor, 'cliente') || '. Agradecemos o retorno.' end,
+        'Acessar o portal', '/app.html#/portal');
       perform public.telegram_enqueue('approval_decided', new.task_id, v_cos, false, true,
         '✅ <b>' || coalesce(nullif(v_cos_names, ''), 'Cliente') || '</b> aprovou o material' || E'\n' || '<b>' || v_title || '</b>'
         || case when (d ->> 'onBehalf')::boolean then E'\n(registrado por ' || coalesce(v_actor, 'equipe') || ')' else E'\nPor ' || coalesce(v_actor, 'cliente') end,
         'Abrir no CRM', '/app.html#/tasks');
     else
       perform public.telegram_enqueue('approval_decided', new.task_id, v_cos, true, false,
-        '✏️ <b>Ajustes solicitados</b>' || E'\n' || v_title || E'\n' || '“' || public.tg_esc(d ->> 'reason') || '”'
-        || E'\nA equipe já foi avisada e vai enviar uma nova versão.',
-        'Abrir portal', '/app.html#/portal');
+        '<b>Solicitação de ajustes recebida</b>' || E'\n' || v_title || E'\n' || '“' || public.tg_esc(d ->> 'reason') || '”'
+        || E'\nNossa equipe dará andamento aos ajustes e enviará uma nova versão para sua avaliação.',
+        'Acessar o portal', '/app.html#/portal');
       perform public.telegram_enqueue('approval_decided', new.task_id, v_cos, false, true,
         '✏️ <b>' || coalesce(nullif(v_cos_names, ''), 'Cliente') || '</b> pediu ajustes' || E'\n' || '<b>' || v_title || '</b>'
         || E'\n' || '“' || public.tg_esc(d ->> 'reason') || '”'
@@ -436,7 +436,7 @@ begin
       return null;
     end if;
     perform public.telegram_enqueue('task_done', new.task_id, v_cos, true, false,
-      '🎉 <b>Tarefa concluída</b>' || E'\n' || v_title, 'Abrir portal', '/app.html#/portal');
+      '<b>Tarefa concluída</b>' || E'\n' || v_title, 'Acessar o portal', '/app.html#/portal');
   end if;
   return null;
 end;
@@ -471,8 +471,8 @@ begin
   loop
     insert into public.notification_outbox (chat_id, kind, text, button_text, button_url)
     values (r.chat_id, 'reminder_client',
-            '⏰ <b>Lembrete: material aguardando aprovação</b>' || E'\n' || r.lines,
-            case when public.telegram_client_url() is not null then 'Ver e aprovar' end,
+            '<b>Lembrete: materiais aguardando sua aprovação</b>' || E'\n' || r.lines,
+            case when public.telegram_client_url() is not null then 'Visualizar e aprovar' end,
             public.telegram_client_url());
     v_n := v_n + 1;
   end loop;

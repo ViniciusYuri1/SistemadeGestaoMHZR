@@ -74,11 +74,11 @@ function reply(chatId: number, text: string) {
 }
 
 const HELP =
-  "🤖 <b>Bot do Sistema de Gestão</b>\n\n" +
-  "/vincular CÓDIGO — liga este grupo a um cliente (o código é gerado no CRM)\n" +
-  "/pendentes — materiais aguardando aprovação\n" +
-  "/desvincular — para de enviar avisos aqui (só administradores do grupo)\n\n" +
-  "Os avisos de aprovação, ajustes e entregas chegam automaticamente neste grupo.";
+  "<b>Assistente do Sistema de Gestão</b>\n\n" +
+  "/vincular CÓDIGO — vincula este grupo a um cliente (código gerado no CRM)\n" +
+  "/pendentes — lista os materiais aguardando aprovação\n" +
+  "/desvincular — encerra o envio de avisos neste grupo (somente administradores)\n\n" +
+  "Os avisos de aprovação, ajustes e entregas são enviados automaticamente neste grupo.";
 
 /* ------------------------------------------------------------------------- */
 /* Webhook                                                                    */
@@ -92,7 +92,7 @@ async function handleUpdate(update: Any) {
       await db.rpc("telegram_chat_left", { p_chat_id: member.chat.id });
     } else if ((status === "member" || status === "administrator") &&
                (member.old_chat_member?.status === "left" || member.old_chat_member?.status === "kicked")) {
-      await reply(member.chat.id, "👋 Olá! Para receber os avisos aqui, peça ao administrador o código no CRM e envie:\n<code>/vincular CÓDIGO</code>");
+      await reply(member.chat.id, "Olá. Para receber os avisos neste grupo, solicite o código de vinculação à nossa equipe e envie:\n<code>/vincular CÓDIGO</code>");
     }
     return;
   }
@@ -121,17 +121,17 @@ async function handleUpdate(update: Any) {
     return;
   }
   if (cmd === "start" || cmd === "ajuda" || cmd === "help") {
-    await reply(chat.id, isGroup ? HELP : HELP + "\n\n<i>Adicione o bot ao grupo do cliente para usar.</i>");
+    await reply(chat.id, isGroup ? HELP : HELP + "\n\n<i>Para utilizar, adicione o assistente ao grupo do cliente.</i>");
     return;
   }
   if (!isGroup) {
-    await reply(chat.id, "Este bot funciona dentro dos grupos de clientes. Adicione-o a um grupo e use /vincular.");
+    await reply(chat.id, "Este assistente funciona nos grupos de clientes. Adicione-o a um grupo e utilize /vincular.");
     return;
   }
 
   if (cmd === "vincular") {
     if (!arg) {
-      await reply(chat.id, "Envie o código gerado no CRM: <code>/vincular CÓDIGO</code>");
+      await reply(chat.id, "Informe o código gerado no CRM: <code>/vincular CÓDIGO</code>");
       return;
     }
     const who = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || msg.from?.username || "";
@@ -139,18 +139,18 @@ async function handleUpdate(update: Any) {
       p_code: arg.replace(/\s+/g, ""), p_chat_id: chat.id, p_title: chat.title ?? "", p_user: who,
     });
     if (error || !data?.ok) {
-      await reply(chat.id, "❌ Código inválido ou expirado. Gere um novo no CRM (vale por 24 horas e uma única vez).");
+      await reply(chat.id, "Código inválido ou expirado. Gere um novo código no CRM (válido por 24 horas e para um único uso).");
       return;
     }
     await reply(chat.id, data.kind === "team"
-      ? "✅ Grupo da <b>equipe</b> vinculado. Aqui chegam as decisões dos clientes e o resumo diário de prazos."
-      : `✅ Grupo vinculado a <b>${esc(data.company)}</b>.\nOs materiais para aprovação e as entregas serão avisados aqui.`);
+      ? "Grupo da <b>equipe</b> vinculado. Aqui serão enviadas as decisões dos clientes e o resumo diário de prazos."
+      : `Grupo vinculado a <b>${esc(data.company)}</b>.\nOs materiais para aprovação e as entregas serão comunicados por aqui.`);
     return;
   }
 
   if (cmd === "pendentes") {
     const { data } = await db.rpc("telegram_pending_text", { p_chat_id: chat.id });
-    await reply(chat.id, data ?? "Este grupo ainda não está vinculado. Use <code>/vincular CÓDIGO</code>.");
+    await reply(chat.id, data ?? "Este grupo ainda não está vinculado. Utilize <code>/vincular CÓDIGO</code>.");
     return;
   }
 
@@ -158,11 +158,11 @@ async function handleUpdate(update: Any) {
     const cm = await tg("getChatMember", { chat_id: chat.id, user_id: msg.from?.id });
     const st = cm.ok ? cm.result.status : "";
     if (st !== "creator" && st !== "administrator") {
-      await reply(chat.id, "Só administradores do grupo podem desvincular.");
+      await reply(chat.id, "Somente administradores do grupo podem desvinculá-lo.");
       return;
     }
     await db.rpc("telegram_chat_left", { p_chat_id: chat.id });
-    await reply(chat.id, "🔕 Grupo desvinculado. Nenhum aviso será enviado aqui.");
+    await reply(chat.id, "Grupo desvinculado. Nenhum aviso será enviado neste grupo.");
   }
 }
 
@@ -175,7 +175,7 @@ async function appUrl(): Promise<string | null> {
   return data ?? null;
 }
 
-function portalKeyboard(app: string | null, label = "📱 Abrir portal") {
+function portalKeyboard(app: string | null, label = "Acessar o portal") {
   if (!app || !/^https:\/\//.test(app)) return undefined;
   return { inline_keyboard: [[{ text: label, web_app: { url: `${app}/telegram.html` } }]] };
 }
@@ -190,12 +190,12 @@ async function handlePrivateStart(msg: Any, payload: string) {
       p_token: payload.slice(2), p_tg_user_id: from.id, p_username: from.username ?? null, p_name: name || null,
     });
     if (!data?.ok) {
-      await reply(msg.chat.id, "❌ Este link de conexão expirou ou já foi usado. No portal, clique de novo em <b>Conectar Telegram</b>.");
+      await reply(msg.chat.id, "Este link de conexão expirou ou já foi utilizado. No portal, clique novamente em <b>Conectar Telegram</b>.");
       return;
     }
     await tg("sendMessage", {
       chat_id: msg.chat.id, parse_mode: "HTML",
-      text: `✅ Telegram conectado à conta de <b>${esc(data.name ?? "")}</b>.\nAgora você abre o portal por aqui, sem senha.`,
+      text: `Telegram conectado à conta de <b>${esc(data.name ?? "")}</b>.\nA partir de agora, o portal pode ser acessado por aqui, sem senha.`,
       reply_markup: portalKeyboard(app),
     });
     return;
@@ -205,14 +205,14 @@ async function handlePrivateStart(msg: Any, payload: string) {
   if (acc?.user_id) {
     await tg("sendMessage", {
       chat_id: msg.chat.id, parse_mode: "HTML",
-      text: `Olá, <b>${esc(acc.name ?? name)}</b>! Toque no botão para ver suas tarefas, materiais e aprovações.`,
+      text: `Olá, <b>${esc(acc.name ?? name)}</b>. Utilize o botão abaixo para acessar suas tarefas, materiais e aprovações.`,
       reply_markup: portalKeyboard(app),
     });
     return;
   }
   const login = app ? `\n\n${esc(app)}/index.html` : "";
   await reply(msg.chat.id,
-    "Para abrir o portal por aqui, entre uma vez pelo navegador com seu e-mail e senha e clique em <b>📱 Conectar Telegram</b>." + login);
+    "Para acessar o portal por aqui, entre uma vez pelo navegador com seu e-mail e senha e clique em <b>Conectar Telegram</b>." + login);
 }
 
 /* initData do Mini App: assinatura HMAC com o token do bot */

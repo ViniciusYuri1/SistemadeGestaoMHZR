@@ -58,7 +58,7 @@
     const tasks = scopedTasks(ctx);
     const statuses = Object.keys(STATUS_LABELS);
     const max = Math.max(1, ...statuses.map((s) => tasks.filter((t) => t.status === s).length));
-    const colors = { backlog: "var(--text-muted)", nao_iniciada: "var(--color-accent-soft)", em_andamento: "var(--color-info)", em_revisao: "var(--color-warning)", aguardando_aprovacao: "var(--color-primary)", ajustes: "var(--color-danger)", concluida: "var(--color-success)" };
+    const colors = { backlog: "var(--text-muted)", nao_iniciada: "var(--color-accent-soft)", em_andamento: "var(--color-info)", em_revisao: "var(--color-warning)", aguardando_aprovacao: "var(--color-primary)", ajustes: "var(--color-danger)", aprovada: "var(--color-success)", concluida: "var(--color-success)" };
 
     return `
       <div class="card">
