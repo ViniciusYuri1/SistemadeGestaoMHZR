@@ -159,6 +159,32 @@
     });
   }
 
+  /* QR code do link de conexão (biblioteca carregada só quando necessário) */
+  const QR_LIB = "https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js";
+  let qrLibPromise = null;
+  function renderQr(el, text) {
+    if (!el) return;
+    if (!qrLibPromise) {
+      qrLibPromise = new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = QR_LIB;
+        s.onload = () => resolve(window.qrcode);
+        s.onerror = () => { qrLibPromise = null; reject(new Error("qr")); };
+        document.head.appendChild(s);
+      });
+    }
+    qrLibPromise
+      .then((qrcode) => {
+        const qr = qrcode(0, "M");
+        qr.addData(text);
+        qr.make();
+        el.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 2, scalable: true });
+        const svg = el.querySelector("svg");
+        if (svg) { svg.style.width = "124px"; svg.style.height = "124px"; }
+      })
+      .catch(() => { el.textContent = "QR indisponível — use a opção 1 ou 3."; });
+  }
+
   async function openTelegramConnectModal(container, ctx) {
     const st = tgState;
     const refresh = () => { tgState = null; UI.hideModal(); window.Views.portal(container, ctx); };
@@ -188,17 +214,36 @@
     const r = await DB.Telegram.connectToken();
     if (!r.ok) { UI.toast(r.message, "error"); return; }
     const link = `https://t.me/${encodeURIComponent(st.bot)}?start=c_${encodeURIComponent(r.token)}`;
+    const command = `/start c_${r.token}`;
     const overlay = UI.showModal(`
       <div class="modal-header"><h3>📱 Conectar Telegram</h3><button class="modal-close" id="tc-close">✕</button></div>
       <div class="modal-body">
-        <p>Conecte uma vez e passe a abrir o portal pelo Telegram, <strong>sem senha</strong>.</p>
-        <ol class="text-sm" style="margin:0 0 14px 18px;line-height:1.8;">
-          <li>Toque em <strong>Abrir o Telegram</strong> (no celular ou no computador com Telegram).</li>
-          <li>Na conversa com <strong>@${UI.escapeHtml(st.bot)}</strong>, toque em <strong>Iniciar</strong>.</li>
-          <li>Volte aqui e toque em <strong>Já conectei</strong>.</li>
-        </ol>
-        <a class="btn btn-primary" id="tc-link" href="${UI.escapeHtml(link)}" target="_blank" rel="noopener" style="width:100%;justify-content:center;">Abrir o Telegram</a>
-        <p class="text-sm text-muted" style="margin-top:10px;">O link vale 15 minutos e só funciona uma vez. Só a sua conta do Telegram passa a entrar no portal.</p>
+        <p>Conecte uma vez e passe a abrir o portal pelo Telegram, <strong>sem senha</strong>. Use a opção mais fácil para você:</p>
+
+        <div style="border:1px solid var(--border-color);border-radius:10px;padding:12px 14px;margin-bottom:10px;">
+          <div style="font-weight:600;margin-bottom:6px;">1. Com o aplicativo do Telegram neste aparelho</div>
+          <a class="btn btn-primary" id="tc-link" href="${UI.escapeHtml(link)}" target="_blank" rel="noopener" style="width:100%;justify-content:center;">Abrir o Telegram</a>
+          <div class="text-sm text-muted" style="margin-top:6px;">Na conversa com <strong>@${UI.escapeHtml(st.bot)}</strong>, toque em <strong>Iniciar</strong>.</div>
+        </div>
+
+        <div style="border:1px solid var(--border-color);border-radius:10px;padding:12px 14px;margin-bottom:10px;display:flex;gap:14px;align-items:center;">
+          <div id="tc-qr" style="width:132px;height:132px;flex:none;background:#fff;border-radius:8px;display:flex;align-items:center;justify-content:center;" class="text-sm text-muted">carregando…</div>
+          <div>
+            <div style="font-weight:600;margin-bottom:6px;">2. Pelo celular</div>
+            <div class="text-sm text-muted">Aponte a câmera do celular para o código, abra o link no Telegram e toque em <strong>Iniciar</strong>.</div>
+          </div>
+        </div>
+
+        <div style="border:1px solid var(--border-color);border-radius:10px;padding:12px 14px;">
+          <div style="font-weight:600;margin-bottom:6px;">3. Pelo Telegram Web ou se nada acima funcionar</div>
+          <div class="text-sm text-muted" style="margin-bottom:8px;">Abra a conversa com <a href="https://web.telegram.org/k/#@${encodeURIComponent(st.bot)}" target="_blank" rel="noopener"><strong>@${UI.escapeHtml(st.bot)}</strong></a>, copie a mensagem abaixo e envie para o bot:</div>
+          <div style="display:flex;gap:8px;">
+            <input type="text" class="form-control" id="tc-cmd" readonly value="${UI.escapeHtml(command)}" style="font-family:monospace;font-size:12.5px;" />
+            <button class="btn btn-secondary" id="tc-copy" type="button">Copiar</button>
+          </div>
+        </div>
+
+        <p class="text-sm text-muted" style="margin-top:10px;">Depois, volte aqui e toque em <strong>Já conectei</strong>. O código vale 15 minutos e só funciona uma vez. Só a sua conta do Telegram passa a entrar no portal.</p>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" id="tc-cancel">Cancelar</button>
@@ -206,6 +251,14 @@
       </div>`, { static: true });
     overlay.querySelector("#tc-close").addEventListener("click", UI.hideModal);
     overlay.querySelector("#tc-cancel").addEventListener("click", UI.hideModal);
+    overlay.querySelector("#tc-copy").addEventListener("click", () => {
+      const input = overlay.querySelector("#tc-cmd");
+      input.select();
+      (navigator.clipboard ? navigator.clipboard.writeText(command) : Promise.reject())
+        .catch(() => document.execCommand("copy"))
+        .then(() => UI.toast("Mensagem copiada. Cole na conversa com o bot e envie.", "success"));
+    });
+    renderQr(overlay.querySelector("#tc-qr"), link);
     overlay.querySelector("#tc-done").addEventListener("click", async () => {
       const acc = await DB.Telegram.myAccount();
       if (!acc) { UI.toast("Ainda não recebemos a conexão. Abra o bot e toque em Iniciar.", "error"); return; }
